@@ -6,7 +6,7 @@ A production-oriented **LINE family group AI** for two approved household member
 - Cloudflare Workers + Queues
 - Cloudflare D1
 - Cloudflare R2
-- Gemini 3.7 Flash
+- Gemini Flash latest + quota fallback routing
 
 The repository is designed so that after Git deployment, the human setup is **UI configuration only**: create/enable the LINE Messaging API account, obtain the Gemini API key, import this repository into Cloudflare, enter four secrets, and register the LINE webhook. D1, R2, the processing Queue and the dead-letter Queue are declared in `wrangler.jsonc` and are automatically provisioned/bound by current Wrangler/Cloudflare deployment behavior.
 
@@ -21,6 +21,9 @@ The repository is designed so that after Git deployment, the human setup is **UI
 - Keeps R2 binary storage at or below the full **10 GB Standard free-storage boundary** (`10,000,000,000` bytes) instead of using an arbitrary safety margin; `/usage` shows actual R2 object bytes.
 - Separates raw chat history, summaries and long-term memory.
 - Runs memory maintenance as separate Queue jobs so it does not consume the LINE reply path's D1 query/latency budget.
+- Uses a dedicated memory model (`GEMINI_MEMORY_MODEL`) so long-term-memory extraction does not spend the primary conversation model's quota.
+- Uses `gemini-flash-latest` as the primary conversation alias, so Google's latest Flash release is adopted automatically when the alias is hot-swapped.
+- On HTTP 429, does **not** retry the same exhausted model. It moves through the configured `GEMINI_FALLBACK_MODELS` ladder. When fallback succeeds, LINE first sends a model-switch notice and then the original answer from the lower model.
 - Invalidates derived memory and summaries when the originating LINE message is unsent.
 - Provides explicit memory/persona/thinking/admin/data-deletion commands.
 - Uses HMAC-SHA256 webhook signature verification and a one-time single-group bind.
@@ -29,6 +32,18 @@ The repository is designed so that after Git deployment, the human setup is **UI
 - Uses Queue + `webhookEventId` idempotency, persistent LINE Push retry keys, explicit delivery state, bounded retries and a dead-letter queue.
 
 The intended deployment is a **dedicated group containing only the two household members and Home AI**. Application-level approval prevents unapproved users' ordinary messages from being stored or sent to Gemini, but it cannot hide bot replies from other humans who are physically present in the LINE group.
+
+## Gemini model routing
+
+Current defaults are configured in `wrangler.jsonc`, not hard-coded into the response logic:
+
+```text
+Conversation primary: gemini-flash-latest
+Fallbacks: gemini-3.7-flash → gemini-3.6-flash → gemini-3.5-flash → gemini-3.5-flash-lite → gemini-3.1-flash-lite
+Long-term memory: gemini-3.5-flash-lite
+```
+
+A 429 from one conversation model causes one attempt on the next model; the exhausted model is not repeatedly retried. Transient 408/5xx failures still receive bounded retry handling.
 
 ## Start here
 
@@ -44,7 +59,7 @@ R2 billing/free-tier behavior: **[R2 Free Tier](docs/R2_FREE_TIER.md)**
 
 ## Health endpoint
 
-`GET /health` — returns `ready:true` only when all four required secrets are present.
+`GET /health` — returns `ready:true` only when all four required secrets are present and includes the configured primary/fallback/memory model route.
 
 ## Webhook endpoint
 

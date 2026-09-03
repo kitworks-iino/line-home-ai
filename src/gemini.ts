@@ -1,4 +1,11 @@
 import type { Env, MessageRow, ThinkingLevel } from "./types.js";
+import {
+  conversationModels,
+  loadModelQuotaBlocks,
+  memoryModel,
+  quotaBlockFrom429,
+  saveModelQuotaBlock,
+} from "./model-routing.js";
 import { base64FromArrayBuffer, safeJson } from "./util.js";
 
 const INTERACTIONS = "https://generativelanguage.googleapis.com/v1beta/interactions";
@@ -16,9 +23,17 @@ interface InteractionResponse {
 }
 
 class GeminiInteractionError extends Error {
-  constructor(public readonly status: number, public readonly raw: string) {
-    super(`Gemini interaction failed: ${status} ${raw}`);
+  constructor(public readonly status: number, public readonly raw: string, public readonly model: string) {
+    super(`Gemini interaction failed: model=${model} status=${status} ${raw}`);
   }
+}
+
+export interface AnswerResult {
+  text: string;
+  model: string | null;
+  exhaustedModels: string[];
+  newlyExhaustedModels: string[];
+  allModelsExhausted: boolean;
 }
 
 function outputText(response: InteractionResponse): string {
@@ -30,42 +45,43 @@ function outputText(response: InteractionResponse): string {
   return chunks.join("\n").trim();
 }
 
-function retryableStatus(status: number): boolean {
-  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+function transientRetryableStatus(status: number): boolean {
+  return status === 408 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-function retryDelayMs(status: number, attempt: number, retryAfter: string | null): number {
+function transientRetryDelayMs(attempt: number, retryAfter: string | null): number {
   if (retryAfter) {
     const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(60_000, Math.max(1_000, seconds * 1000));
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(30_000, Math.max(1_000, seconds * 1000));
   }
-  const rateLimitDelays = [15_000, 30_000, 60_000];
-  const serverDelays = [2_000, 5_000, 10_000];
-  return status === 429
-    ? rateLimitDelays[Math.min(attempt, rateLimitDelays.length - 1)]!
-    : serverDelays[Math.min(attempt, serverDelays.length - 1)]!;
+  const delays = [2_000, 5_000, 10_000];
+  return delays[Math.min(attempt, delays.length - 1)]!;
 }
 
-async function interaction(env: Env, body: Record<string,unknown>): Promise<string> {
+async function interaction(env: Env, model: string, body: Record<string,unknown>): Promise<string> {
   for (let attempt = 0; attempt < INTERACTION_ATTEMPTS; attempt++) {
     const res = await fetch(INTERACTIONS, {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-      body: JSON.stringify({ model: env.GEMINI_MODEL || "gemini-3.7-flash", store: false, ...body }),
+      body: JSON.stringify({ model, store: false, ...body }),
     });
     const raw = await res.text();
     if (res.ok) {
       const json = safeJson<InteractionResponse>(raw);
       const text = outputText(json);
-      if (!text) throw new Error(`Gemini returned no text output (status=${json.status ?? "unknown"})`);
+      if (!text) throw new Error(`Gemini returned no text output (model=${model}, status=${json.status ?? "unknown"})`);
       return text;
     }
 
-    if (!retryableStatus(res.status) || attempt === INTERACTION_ATTEMPTS - 1) {
-      throw new GeminiInteractionError(res.status, raw);
+    // Quota exhaustion is handled by the routing layer. Retrying the same model here
+    // would multiply RPM/RPD usage without improving the chance of success.
+    if (res.status === 429) throw new GeminiInteractionError(res.status, raw, model);
+
+    if (!transientRetryableStatus(res.status) || attempt === INTERACTION_ATTEMPTS - 1) {
+      throw new GeminiInteractionError(res.status, raw, model);
     }
 
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(res.status, attempt, res.headers.get("retry-after"))));
+    await new Promise((resolve) => setTimeout(resolve, transientRetryDelayMs(attempt, res.headers.get("retry-after"))));
   }
   throw new Error("Gemini interaction exhausted retries unexpectedly");
 }
@@ -172,33 +188,75 @@ export async function mediaInputs(env: Env, messages: MessageRow[], max: number)
   return { inputs, cleanup: async () => { await Promise.all(uploaded.map((f) => deleteGeminiFile(env,f.name).catch(()=>undefined))); } };
 }
 
-export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel): Promise<string> {
-  try {
-    return await interaction(env, {
-      system_instruction: systemInstruction,
-      input: [{type:"text",text:prompt}, ...media],
-      generation_config: { thinking_level: thinking },
-    });
-  } catch (error) {
-    if (error instanceof GeminiInteractionError) {
-      if (error.status === 429) {
-        return "Gemini APIの利用上限またはレート制限に達したため、今回は回答を生成できませんでした。少し時間を空けてもう一度呼びかけてください。";
-      }
-      if (error.status >= 500) {
-        return `Gemini API側の一時障害（HTTP ${error.status}）で回答を生成できませんでした。少し時間を空けてもう一度呼びかけてください。`;
-      }
-      return `Gemini APIへの接続でHTTP ${error.status}エラーが発生したため、回答を生成できませんでした。設定またはAPI状態の確認が必要です。`;
+export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel): Promise<AnswerResult> {
+  const models = conversationModels(env);
+  const exhaustedModels: string[] = [];
+  const newlyExhaustedModels: string[] = [];
+  const quotaBlocks = await loadModelQuotaBlocks(env, models).catch((error) => {
+    console.warn("failed to load Gemini quota blocks; continuing with live probes", error);
+    return new Map();
+  });
+
+  for (const model of models) {
+    if (quotaBlocks.has(model)) {
+      exhaustedModels.push(model);
+      continue;
     }
-    if (error instanceof Error && error.message.startsWith("Gemini returned no text output")) {
-      return "Geminiから有効なテキスト回答を取得できませんでした。もう一度呼びかけてください。";
+
+    try {
+      const text = await interaction(env, model, {
+        system_instruction: systemInstruction,
+        input: [{type:"text",text:prompt}, ...media],
+        generation_config: { thinking_level: thinking },
+      });
+      return { text, model, exhaustedModels, newlyExhaustedModels, allModelsExhausted: false };
+    } catch (error) {
+      if (error instanceof GeminiInteractionError && error.status === 429) {
+        const block = quotaBlockFrom429(error.raw);
+        await saveModelQuotaBlock(env, model, block).catch((persistError) => {
+          console.warn(`failed to persist Gemini quota block model=${model}`, persistError);
+        });
+        exhaustedModels.push(model);
+        newlyExhaustedModels.push(model);
+        continue;
+      }
+      if (error instanceof GeminiInteractionError) {
+        if (error.status >= 500) {
+          return {
+            text: `Gemini API側の一時障害（HTTP ${error.status}）で回答を生成できませんでした。少し時間を空けてもう一度呼びかけてください。`,
+            model,
+            exhaustedModels,
+            newlyExhaustedModels,
+            allModelsExhausted: false,
+          };
+        }
+        return {
+          text: `Gemini APIへの接続でHTTP ${error.status}エラーが発生したため、回答を生成できませんでした。設定またはAPI状態の確認が必要です。`,
+          model,
+          exhaustedModels,
+          newlyExhaustedModels,
+          allModelsExhausted: false,
+        };
+      }
+      if (error instanceof Error && error.message.startsWith("Gemini returned no text output")) {
+        return {
+          text: "Geminiから有効なテキスト回答を取得できませんでした。もう一度呼びかけてください。",
+          model,
+          exhaustedModels,
+          newlyExhaustedModels,
+          allModelsExhausted: false,
+        };
+      }
+      throw error;
     }
-    throw error;
   }
+
+  return { text: "", model: null, exhaustedModels, newlyExhaustedModels, allModelsExhausted: true };
 }
 
 export interface MemoryExtraction {
   summary: string;
-  memories: Array<{ action:"upsert"|"delete"; subject_key:string; memory_key:string; content:string; confidence:number; source_message_ids:string[] }>;
+  memories: Array<{ action:"upsert"|"delete"; subject_key:string; memory_key:string; content:string;confidence:number;source_message_ids:string[] }>;
 }
 
 const MEMORY_SCHEMA = {
@@ -217,12 +275,28 @@ const MEMORY_SCHEMA = {
   },required:["summary","memories"]
 };
 
-export async function extractMemory(env: Env, prompt: string): Promise<MemoryExtraction> {
-  const text = await interaction(env, {
-    system_instruction: "あなたは家庭内会話の記憶管理器です。永続価値のある事実・嗜好・予定・合意・人間関係・継続中の課題だけを抽出してください。雑談、推測、一時的感情、センシティブ情報の不必要な推測は記憶しません。既存記憶と矛盾する新情報は同じmemory_keyでupsertしてください。撤回が明示された場合はdelete。変更候補は重要度順に最大8件です。source_message_idsは根拠となる実在IDのみ。subject_keyは家族共通ならfamily、個人なら提示されたuser_idを厳密に使います。",
-    input: prompt,
-    generation_config: { thinking_level: "low" },
-    response_format: { type:"text", mime_type:"application/json", schema: MEMORY_SCHEMA },
-  });
-  return safeJson<MemoryExtraction>(text);
+export async function extractMemory(env: Env, prompt: string): Promise<MemoryExtraction | null> {
+  const model = memoryModel(env);
+  const quotaBlocks = await loadModelQuotaBlocks(env, [model]).catch(() => new Map());
+  if (quotaBlocks.has(model)) return null;
+
+  try {
+    const text = await interaction(env, model, {
+      system_instruction: "あなたは家庭内会話の記憶管理器です。永続価値のある事実・嗜好・予定・合意・人間関係・継続中の課題だけを抽出してください。雑談、推測、一時的感情、センシティブ情報の不必要な推測は記憶しません。既存記憶と矛盾する新情報は同じmemory_keyでupsertしてください。撤回が明示された場合はdelete。変更候補は重要度順に最大8件です。source_message_idsは根拠となる実在IDのみ。subject_keyは家族共通ならfamily、個人なら提示されたuser_idを厳密に使います。",
+      input: prompt,
+      generation_config: { thinking_level: "low" },
+      response_format: { type:"text", mime_type:"application/json", schema: MEMORY_SCHEMA },
+    });
+    return safeJson<MemoryExtraction>(text);
+  } catch (error) {
+    if (error instanceof GeminiInteractionError && error.status === 429) {
+      const block = quotaBlockFrom429(error.raw);
+      await saveModelQuotaBlock(env, model, block).catch((persistError) => {
+        console.warn(`failed to persist memory-model quota block model=${model}`, persistError);
+      });
+      console.warn(`memory model quota limited; postponing extraction model=${model} scope=${block.scope}`);
+      return null;
+    }
+    throw error;
+  }
 }

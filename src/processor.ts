@@ -26,16 +26,18 @@ import {
 import { runCommand } from "./commands.js";
 import { conversationPrompt, memoryExtractionPrompt, systemInstruction } from "./context.js";
 import { answer, extractMemory, mediaInputs } from "./gemini.js";
-import { getGroupMemberProfile, getMessageContent, sendBestEffort } from "./line.js";
+import { allModelsExhaustedNotice, fallbackNotice } from "./model-routing.js";
+import { getGroupMemberProfile, getMessageContent, lineTextParts, sendBestEffortTexts } from "./line.js";
 import {
   asInt,
   hasNaturalInvocation,
   hasSelfMention,
   normalizeThinking,
   parseCommand,
-  splitLineText,
   stripNaturalInvocation,
 } from "./util.js";
+
+const MULTI_RESPONSE_PREFIX = "__LINE_HOME_AI_MULTI_V1__:";
 
 function eventId(payload: LineQueuePayload): string {
   const e = payload.event;
@@ -57,10 +59,29 @@ function quotedMessageId(message: LineMessage | undefined): string | null {
   return message && "quotedMessageId" in message ? message.quotedMessageId ?? null : null;
 }
 
-function capLineResponse(text: string): string {
-  const max = 22_000;
+function capLineResponse(text: string, max = 22_000): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max - 40).trimEnd()}\n\n[LINEの送信上限に合わせて末尾を省略しました]`;
+}
+
+function encodeDeliveryMessages(messages: string[]): string {
+  const normalized = messages.map((message, index) => capLineResponse(message, messages.length > 1 && index === messages.length - 1 ? 17_000 : 22_000));
+  if (normalized.length <= 1) return normalized[0] ?? "";
+  return `${MULTI_RESPONSE_PREFIX}${JSON.stringify(normalized)}`;
+}
+
+function decodeDeliveryMessages(value: string): string[] {
+  if (!value.startsWith(MULTI_RESPONSE_PREFIX)) return [value];
+  try {
+    const parsed = JSON.parse(value.slice(MULTI_RESPONSE_PREFIX.length)) as unknown;
+    if (Array.isArray(parsed)) {
+      const messages = parsed.filter((item): item is string => typeof item === "string" && item.length > 0);
+      if (messages.length) return messages;
+    }
+  } catch {
+    // Fall through and surface the cached string rather than losing a response.
+  }
+  return [value];
 }
 
 async function removeGroupMedia(env: Env, groupId: string): Promise<void> {
@@ -82,7 +103,7 @@ async function deliver(
   text: string,
   persistAssistant: boolean,
 ): Promise<void> {
-  const response = capLineResponse(text);
+  const response = text.startsWith(MULTI_RESPONSE_PREFIX) ? text : capLineResponse(text);
   let state = await eventResponse(env, eventKey);
   if (!state) throw new Error("Webhook delivery state disappeared");
   if (!state.response_text) {
@@ -93,16 +114,17 @@ async function deliver(
   if (state.delivered_at) return;
 
   const responseText = state.response_text ?? response;
+  const texts = decodeDeliveryMessages(responseText);
   const token = state.reply_attempted_at ? undefined : replyToken;
   await markReplyAttempted(env, eventKey);
-  const sent = await sendBestEffort(env, groupId, token, timestamp, responseText, state.push_retry_key);
+  const sent = await sendBestEffortTexts(env, groupId, token, timestamp, texts, state.push_retry_key);
 
   if (persistAssistant && sent.length) {
-    const parts = splitLineText(responseText);
+    const parts = lineTextParts(texts);
     for (let i = 0; i < sent.length; i++) {
       const id = sent[i]?.id;
       if (!id) continue;
-      await saveAssistantMessage(env, groupId, id, parts[i] ?? responseText, Date.now() + i);
+      await saveAssistantMessage(env, groupId, id, parts[i] ?? texts[texts.length - 1] ?? responseText, Date.now() + i);
     }
   }
   await markDelivered(env, eventKey);
@@ -193,6 +215,7 @@ async function maintainMemory(env: Env, groupId: string): Promise<void> {
   const members = await listMembers(env, groupId);
   const existing = await listMemories(env, groupId, "", 120);
   const extracted = await extractMemory(env, memoryExtractionPrompt(messages, existing, members));
+  if (!extracted) return;
   const sourceSet = new Set(messages.map((m) => m.line_message_id));
   const allSources = [...sourceSet];
   const last = messages[messages.length - 1]!;
@@ -397,7 +420,16 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
       try {
         const thinking: ThinkingLevel = deepPrompt ? "high" : group.thinking_level;
         const generated = await answer(env, systemInstruction(group, members), prompt, media.inputs, thinking);
-        await cacheEventResponse(env, key, capLineResponse(generated));
+        let response: string;
+        if (generated.allModelsExhausted || !generated.model) {
+          response = allModelsExhaustedNotice(generated.exhaustedModels);
+        } else {
+          const notice = fallbackNotice(generated.exhaustedModels, generated.model);
+          response = notice
+            ? encodeDeliveryMessages([notice, generated.text])
+            : capLineResponse(generated.text);
+        }
+        await cacheEventResponse(env, key, response);
       } finally {
         await media.cleanup();
       }

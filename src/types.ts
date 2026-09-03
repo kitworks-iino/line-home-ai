@@ -9,6 +9,8 @@ export interface Env {
   GEMINI_API_KEY: string;
   SETUP_CODE: string;
   GEMINI_MODEL: string;
+  GEMINI_FALLBACK_MODELS: string;
+  GEMINI_MEMORY_MODEL: string;
   DEFAULT_THINKING_LEVEL: string;
   BOT_DISPLAY_NAME: string;
   MEMORY_BATCH_SIZE: string;
