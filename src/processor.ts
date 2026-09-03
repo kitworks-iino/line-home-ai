@@ -1,4 +1,4 @@
-import type { Env, LineMessage, LineTextMessage, MessageRow, QueuePayload, ThinkingLevel } from "./types.js";
+import type { Env, LineMessage, LineQueuePayload, LineTextMessage, MessageRow, QueuePayload, ThinkingLevel } from "./types.js";
 import { ensureSchema } from "./schema.js";
 import {
   bindGroup,
@@ -37,7 +37,7 @@ import {
   stripNaturalInvocation,
 } from "./util.js";
 
-function eventId(payload: QueuePayload): string {
+function eventId(payload: LineQueuePayload): string {
   const e = payload.event;
   if (e.webhookEventId) return e.webhookEventId;
   const source = e.source.groupId ?? e.source.roomId ?? e.source.userId ?? "unknown";
@@ -45,7 +45,7 @@ function eventId(payload: QueuePayload): string {
   return `fallback:${source}:${e.type}:${e.timestamp}:${message}`;
 }
 
-function groupIdOf(payload: QueuePayload): string | null {
+function groupIdOf(payload: LineQueuePayload): string | null {
   return payload.event.source.type === "group" ? payload.event.source.groupId ?? null : null;
 }
 
@@ -170,6 +170,10 @@ async function persistIncoming(
   });
 }
 
+async function enqueueMemoryMaintenance(env: Env, groupId: string): Promise<void> {
+  await env.EVENT_QUEUE.send({ kind: "memory", groupId, requestedAt: Date.now() }, { contentType: "json" });
+}
+
 async function maintainMemory(env: Env, groupId: string): Promise<void> {
   const batchSize = asInt(env.MEMORY_BATCH_SIZE, 24, 4, 100);
   const cursor = await env.DB.prepare(
@@ -190,19 +194,19 @@ async function maintainMemory(env: Env, groupId: string): Promise<void> {
   const existing = await listMemories(env, groupId, "", 120);
   const extracted = await extractMemory(env, memoryExtractionPrompt(messages, existing, members));
   const sourceSet = new Set(messages.map((m) => m.line_message_id));
+  const allSources = [...sourceSet];
   const last = messages[messages.length - 1]!;
   const statements: D1PreparedStatement[] = [];
 
   if (extracted.summary.trim()) {
     statements.push(env.DB.prepare("INSERT INTO summaries(group_id,summary,created_at) VALUES(?,?,?)")
       .bind(groupId, extracted.summary.trim(), Date.now()));
-    for (const source of sourceSet) {
-      statements.push(env.DB.prepare(`INSERT OR IGNORE INTO summary_sources(summary_id,line_message_id)
-        SELECT id,? FROM summaries WHERE group_id=? ORDER BY id DESC LIMIT 1`).bind(source, groupId));
-    }
+    statements.push(env.DB.prepare(`INSERT OR IGNORE INTO summary_sources(summary_id,line_message_id)
+      SELECT (SELECT id FROM summaries WHERE group_id=? ORDER BY id DESC LIMIT 1), CAST(value AS TEXT)
+      FROM json_each(?)`).bind(groupId, JSON.stringify(allSources)));
   }
 
-  for (const memory of extracted.memories) {
+  for (const memory of extracted.memories.slice(0, 8)) {
     const validSources = [...new Set(memory.source_message_ids.filter((id) => sourceSet.has(id)))];
     const subject = memory.subject_key.trim();
     const key = memory.memory_key.trim();
@@ -214,21 +218,22 @@ async function maintainMemory(env: Env, groupId: string): Promise<void> {
     }
     const content = memory.content.trim();
     if (!content || !Number.isFinite(memory.confidence) || memory.confidence < 0.6) continue;
+    const now = Date.now();
     statements.push(env.DB.prepare(`INSERT INTO memories(group_id,subject_key,memory_key,content,confidence,manual,active,created_at,updated_at)
       VALUES(?,?,?,?,?,0,1,?,?)
       ON CONFLICT(group_id,subject_key,memory_key) DO UPDATE SET
         content=CASE WHEN memories.manual=1 THEN memories.content ELSE excluded.content END,
         confidence=CASE WHEN memories.manual=1 THEN memories.confidence ELSE excluded.confidence END,
         active=1,updated_at=excluded.updated_at`)
-      .bind(groupId, subject, key, content, Math.max(0, Math.min(1, memory.confidence)), Date.now(), Date.now()));
+      .bind(groupId, subject, key, content, Math.max(0, Math.min(1, memory.confidence)), now, now));
     statements.push(env.DB.prepare(`DELETE FROM memory_sources WHERE memory_id IN
       (SELECT id FROM memories WHERE group_id=? AND subject_key=? AND memory_key=? AND manual=0)`)
       .bind(groupId, subject, key));
-    for (const source of validSources) {
-      statements.push(env.DB.prepare(`INSERT OR IGNORE INTO memory_sources(memory_id,line_message_id)
-        SELECT id,? FROM memories WHERE group_id=? AND subject_key=? AND memory_key=? AND manual=0`)
-        .bind(source, groupId, subject, key));
-    }
+    statements.push(env.DB.prepare(`INSERT OR IGNORE INTO memory_sources(memory_id,line_message_id)
+      SELECT m.id, CAST(j.value AS TEXT)
+      FROM memories AS m, json_each(?) AS j
+      WHERE m.group_id=? AND m.subject_key=? AND m.memory_key=? AND m.manual=0`)
+      .bind(JSON.stringify(validSources), groupId, subject, key));
   }
 
   statements.push(env.DB.prepare("UPDATE groups SET memory_cursor_at=?,memory_cursor_message_id=? WHERE group_id=?")
@@ -236,20 +241,18 @@ async function maintainMemory(env: Env, groupId: string): Promise<void> {
   await env.DB.batch(statements);
 }
 
-async function handleDeleteAll(env: Env, eventKey: string, groupId: string, payload: QueuePayload, text: string): Promise<void> {
+async function handleDeleteAll(env: Env, eventKey: string, groupId: string, payload: LineQueuePayload, text: string): Promise<void> {
   const state = await eventResponse(env, eventKey);
   if (!state?.delivered_at) {
     await deliver(env, eventKey, groupId, payload.event.replyToken, payload.event.timestamp, text, false);
   }
-  // R2 first. If this fails, D1 still contains the delivery state and Queue retry is safe.
   await removeGroupMedia(env, groupId);
-  // D1 deletion is a batch in db.ts and removes the event row last with the rest of group state.
   await deleteGroupData(env, groupId);
 }
 
 async function handleCommand(
   env: Env,
-  payload: QueuePayload,
+  payload: LineQueuePayload,
   eventKey: string,
   groupId: string,
   userId: string,
@@ -276,7 +279,7 @@ async function handleCommand(
       const thinking = normalizeThinking(env.DEFAULT_THINKING_LEVEL, "medium");
       const ok = await bindGroup(env, groupId, userId, displayName, thinking);
       text = ok
-        ? `${displayName} を管理者としてHome AIをこのグループに登録しました。\nとちょ側は /join を送り、その後この管理者が /approve CODE で承認してください。`
+        ? `${displayName} を管理者としてHome AIをこのグループに登録しました。\n2人目は /join を送り、その後この管理者が /approve CODE で承認してください。`
         : "セットアップに失敗しました。";
     }
     await deliver(env, eventKey, groupId, payload.event.replyToken, payload.event.timestamp, text, false);
@@ -285,7 +288,6 @@ async function handleCommand(
   }
 
   if (!bound || bound !== groupId) {
-    // Do not expose this deployment to any group other than the one-time bound group.
     await completeEvent(env, eventKey);
     return { handled: true };
   }
@@ -313,8 +315,7 @@ async function handleCommand(
   return { handled: true };
 }
 
-export async function processQueuePayload(env: Env, payload: QueuePayload): Promise<void> {
-  await ensureSchema(env);
+async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<void> {
   const event = payload.event;
   const groupId = groupIdOf(payload);
   const key = eventId(payload);
@@ -353,13 +354,11 @@ export async function processQueuePayload(env: Env, payload: QueuePayload): Prom
     if (command) {
       const outcome = await handleCommand(env, payload, key, groupId, userId, displayName, command);
       if (outcome.handled) return;
-      // /deep intentionally falls through into the normal conversational path.
     }
 
     const group = await getGroup(env, groupId);
     const member = await getMember(env, groupId, userId);
     if (!group || !member) {
-      // Unapproved users are neither stored nor passed to Gemini.
       await completeEvent(env, key);
       return;
     }
@@ -374,7 +373,7 @@ export async function processQueuePayload(env: Env, payload: QueuePayload): Prom
     if (!invoked && quoted) invoked = await isAssistantMessage(env, groupId, quoted);
 
     if (!invoked) {
-      await maintainMemory(env, groupId);
+      await enqueueMemoryMaintenance(env, groupId);
       await completeEvent(env, key);
       return;
     }
@@ -407,10 +406,19 @@ export async function processQueuePayload(env: Env, payload: QueuePayload): Prom
 
     if (!state?.response_text) throw new Error("AI response was not cached");
     await deliver(env, key, groupId, event.replyToken, event.timestamp, state.response_text, true);
-    await maintainMemory(env, groupId);
+    await enqueueMemoryMaintenance(env, groupId);
     await completeEvent(env, key);
   } catch (error) {
     await failEvent(env, key).catch(() => undefined);
     throw error;
   }
+}
+
+export async function processQueuePayload(env: Env, payload: QueuePayload): Promise<void> {
+  await ensureSchema(env);
+  if (payload.kind === "memory") {
+    await maintainMemory(env, payload.groupId);
+    return;
+  }
+  await processLinePayload(env, payload);
 }
