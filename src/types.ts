@@ -16,11 +16,20 @@ export interface Env {
   MAX_MEDIA_CONTEXT: string;
 }
 
-export interface QueuePayload {
+export interface LineQueuePayload {
+  kind?: "line";
   destination: string;
   event: LineWebhookEvent;
   receivedAt: number;
 }
+
+export interface MemoryQueuePayload {
+  kind: "memory";
+  groupId: string;
+  requestedAt: number;
+}
+
+export type QueuePayload = LineQueuePayload | MemoryQueuePayload;
 
 export interface LineWebhookBody {
   destination: string;
