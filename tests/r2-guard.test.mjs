@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { canStoreWithinR2Limit, formatDecimalBytes, r2HardLimitBytes, r2StorageUsage } from '../.test-dist/r2-guard.js';
 
 test('R2 storage guard uses the full configured limit with no arbitrary headroom',()=>{
+  assert.equal(canStoreWithinR2Limit(0,10_000_000_000,10_000_000_000),true);
   assert.equal(canStoreWithinR2Limit(9_000_000_000,1_000_000_000,10_000_000_000),true);
   assert.equal(canStoreWithinR2Limit(9_999_999_999,1,10_000_000_000),true);
   assert.equal(canStoreWithinR2Limit(9_999_999_999,2,10_000_000_000),false);
