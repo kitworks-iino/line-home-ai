@@ -1,0 +1,21 @@
+{
+  "name": "line-home-ai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A production-oriented family AI resident in a LINE group, powered by Gemini and Cloudflare Workers.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "rm -rf .test-dist && tsc --outDir .test-dist --noEmit false && node --test tests/*.test.mjs",
+    "check": "npm run typecheck && npm test",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "wrangler": "4.45.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
