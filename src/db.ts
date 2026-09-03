@@ -11,14 +11,14 @@ export async function bindGroup(env: Env, groupId: string, userId: string, displ
   const now = nowMs();
   await env.DB.batch([
     env.DB.prepare("INSERT INTO app_state(key,value,updated_at) VALUES('bound_group_id',?,?)").bind(groupId, now),
-    env.DB.prepare("INSERT INTO groups(group_id,created_at,thinking_level,memory_cursor_at) VALUES(?,?,?,0)").bind(groupId, now, thinking),
+    env.DB.prepare("INSERT INTO groups(group_id,created_at,thinking_level,memory_cursor_at,memory_cursor_message_id) VALUES(?,?,?,?, '')").bind(groupId, now, thinking, 0),
     env.DB.prepare("INSERT INTO members(group_id,user_id,display_name,role,approved_at,active) VALUES(?,?,?,'admin',?,1)").bind(groupId, userId, displayName, now),
   ]);
   return true;
 }
 
 export async function getGroup(env: Env, groupId: string): Promise<GroupRow | null> {
-  return env.DB.prepare("SELECT group_id,created_at,persona,thinking_level,memory_cursor_at FROM groups WHERE group_id=?").bind(groupId).first<GroupRow>();
+  return env.DB.prepare("SELECT group_id,created_at,persona,thinking_level,memory_cursor_at,memory_cursor_message_id FROM groups WHERE group_id=?").bind(groupId).first<GroupRow>();
 }
 
 export async function getMember(env: Env, groupId: string, userId: string): Promise<MemberRow | null> {
@@ -157,13 +157,14 @@ export async function getMessagesAfter(env: Env, groupId: string, after: number,
 
 export async function unsendMessage(env: Env, groupId: string, lineMessageId: string): Promise<string | null> {
   const row = await env.DB.prepare("SELECT media_key FROM messages WHERE group_id=? AND line_message_id=?").bind(groupId,lineMessageId).first<{media_key:string|null}>();
-  await env.DB.prepare("UPDATE messages SET unsent=1,text=NULL,media_key=NULL,mime_type=NULL,media_size=NULL WHERE group_id=? AND line_message_id=?").bind(groupId,lineMessageId).run();
-  const memoryIds = await env.DB.prepare("SELECT memory_id FROM memory_sources WHERE line_message_id=?").bind(lineMessageId).all<{memory_id:number}>();
-  for (const m of memoryIds.results ?? []) await env.DB.prepare("UPDATE memories SET active=0,updated_at=? WHERE id=?").bind(nowMs(),m.memory_id).run();
-  const summaryIds = await env.DB.prepare("SELECT summary_id FROM summary_sources WHERE line_message_id=?").bind(lineMessageId).all<{summary_id:number}>();
-  for (const s of summaryIds.results ?? []) await env.DB.prepare("DELETE FROM summaries WHERE id=?").bind(s.summary_id).run();
-  await env.DB.prepare("DELETE FROM memory_sources WHERE line_message_id=?").bind(lineMessageId).run();
-  await env.DB.prepare("DELETE FROM summary_sources WHERE line_message_id=?").bind(lineMessageId).run();
+  const now = nowMs();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE messages SET unsent=1,text=NULL,media_key=NULL,mime_type=NULL,media_size=NULL WHERE group_id=? AND line_message_id=?").bind(groupId,lineMessageId),
+    env.DB.prepare("UPDATE memories SET active=0,updated_at=? WHERE id IN (SELECT memory_id FROM memory_sources WHERE line_message_id=?)").bind(now,lineMessageId),
+    env.DB.prepare("DELETE FROM memory_sources WHERE memory_id IN (SELECT memory_id FROM memory_sources WHERE line_message_id=?)").bind(lineMessageId),
+    env.DB.prepare("DELETE FROM summaries WHERE id IN (SELECT summary_id FROM summary_sources WHERE line_message_id=?)").bind(lineMessageId),
+    env.DB.prepare("DELETE FROM summary_sources WHERE NOT EXISTS (SELECT 1 FROM summaries WHERE summaries.id=summary_sources.summary_id)"),
+  ]);
   return row?.media_key ?? null;
 }
 
@@ -181,7 +182,10 @@ export async function upsertMemory(env: Env, groupId: string, subjectKey: string
   const id = await env.DB.prepare("SELECT id FROM memories WHERE group_id=? AND subject_key=? AND memory_key=?").bind(groupId,subjectKey,memoryKey).first<number>("id");
   if (id == null) throw new Error("Failed to upsert memory");
   await env.DB.prepare("DELETE FROM memory_sources WHERE memory_id=?").bind(id).run();
-  for (const source of sourceIds) await env.DB.prepare("INSERT OR IGNORE INTO memory_sources(memory_id,line_message_id) VALUES(?,?)").bind(id,source).run();
+  if (sourceIds.length) {
+    await env.DB.prepare(`INSERT OR IGNORE INTO memory_sources(memory_id,line_message_id)
+      SELECT ?, CAST(value AS TEXT) FROM json_each(?)`).bind(id,JSON.stringify([...new Set(sourceIds)])).run();
+  }
   return id;
 }
 
@@ -200,8 +204,9 @@ export async function addSummary(env: Env, groupId: string, summary: string, sou
   const now = nowMs();
   await env.DB.prepare("INSERT INTO summaries(group_id,summary,created_at) VALUES(?,?,?)").bind(groupId,summary,now).run();
   const id = await env.DB.prepare("SELECT last_insert_rowid() AS id").first<number>("id");
-  if (id == null) return;
-  for (const source of sourceIds) await env.DB.prepare("INSERT OR IGNORE INTO summary_sources(summary_id,line_message_id) VALUES(?,?)").bind(id,source).run();
+  if (id == null || !sourceIds.length) return;
+  await env.DB.prepare(`INSERT OR IGNORE INTO summary_sources(summary_id,line_message_id)
+    SELECT ?, CAST(value AS TEXT) FROM json_each(?)`).bind(id,JSON.stringify([...new Set(sourceIds)])).run();
 }
 
 export async function listSummaries(env: Env, groupId: string, limit = 8): Promise<SummaryRow[]> {
