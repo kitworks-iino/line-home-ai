@@ -6,6 +6,8 @@ import {
   fallbackNotice,
   memoryModel,
   modelDisplayName,
+  nextPacificQuotaResetMs,
+  quotaBlockFrom429,
 } from '../.test-dist/model-routing.js';
 
 test('conversation routing keeps latest alias first and deduplicates fallbacks',()=>{
@@ -29,7 +31,32 @@ test('model names and fallback notice are readable in LINE',()=>{
   assert.match(notice,/今回は Gemini 3\.6 Flash が対応します/);
 });
 
-test('all-exhausted notice includes attempted model chain',()=>{
+test('all-exhausted notice includes unavailable model chain',()=>{
   const notice=allModelsExhaustedNotice(['gemini-flash-latest','gemini-3.7-flash']);
   assert.match(notice,/Gemini Flash 最新版 → Gemini 3\.7 Flash/);
+  assert.match(notice,/現在利用できないモデル/);
+});
+
+test('per-minute 429 honors RetryInfo and adds a small safety second',()=>{
+  const now=1_800_000_000_000;
+  const raw=JSON.stringify({error:{details:[
+    {'@type':'type.googleapis.com/google.rpc.QuotaFailure',violations:[{quotaId:'GenerateRequestsPerMinutePerProjectPerModel-FreeTier'}]},
+    {'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'12.5s'},
+  ]}});
+  const block=quotaBlockFrom429(raw,now);
+  assert.equal(block.scope,'minute');
+  assert.equal(block.blockedUntil,now+13_500);
+});
+
+test('per-day 429 blocks until at least the next Pacific midnight',()=>{
+  const now=Date.parse('2026-09-03T05:30:00Z');
+  const raw=JSON.stringify({error:{details:[
+    {'@type':'type.googleapis.com/google.rpc.QuotaFailure',violations:[{quotaId:'GenerateRequestsPerDayPerProjectPerModel-FreeTier'}]},
+    {'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'30s'},
+  ]}});
+  const reset=nextPacificQuotaResetMs(now);
+  const block=quotaBlockFrom429(raw,now);
+  assert.equal(block.scope,'day');
+  assert.ok(block.blockedUntil>=reset+2_000);
+  assert.equal(new Date(reset).toISOString(),'2026-09-03T07:00:00.000Z');
 });
