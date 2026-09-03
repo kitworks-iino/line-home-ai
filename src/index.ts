@@ -1,5 +1,6 @@
 import type { Env, LineWebhookBody, QueuePayload } from "./types.js";
 import { ensureSchema } from "./schema.js";
+import { modelRoute } from "./model-routing.js";
 import { processQueuePayload } from "./processor.js";
 import { constantTimeEqual } from "./util.js";
 
@@ -41,12 +42,14 @@ export default {
         console.error("health schema initialization failed", error);
       }
       const configured = Object.values(required).every(Boolean);
+      const routing = modelRoute(env);
       return Response.json({
         ok: database,
         ready: database && configured,
         service:"line-home-ai",
-        model:env.GEMINI_MODEL,
-        version:"1.0.1",
+        model:routing.primary,
+        modelRouting:routing,
+        version:"1.1.0",
         database,
         configuration:required,
       }, { status: database ? 200 : 503 });
