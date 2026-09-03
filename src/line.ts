@@ -24,8 +24,6 @@ async function lineFetch(env: Env, url: string, init: RequestInit = {}): Promise
   };
   let res = await execute();
   if (res.status === 401) {
-    // A short-lived token can still be invalidated by credential rotation. Refresh once;
-    // do not loop indefinitely on a genuinely invalid Channel ID/secret.
     tokenCache = null;
     res = await execute();
   }
@@ -45,14 +43,9 @@ export async function getMessageContent(env: Env, messageId: string): Promise<{b
   const buffer = await res.arrayBuffer();
   const contentType = res.headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream";
 
-  // R2's 10 GB-month free storage allowance is usage-based billing, not a hard platform quota.
-  // Keep the bucket's instantaneous object bytes at or below 10,000,000,000 bytes so the
-  // daily-peak average used for GB-month billing cannot exceed the storage free tier.
   const usage = await r2StorageUsage(env);
   const limit = r2HardLimitBytes(env);
   if (!canStoreWithinR2Limit(usage.bytes, buffer.byteLength, limit)) {
-    // Persist a zero-byte marker instead of the binary. This keeps normal message processing,
-    // unsend cleanup and conversation history intact without adding billable storage bytes.
     return { buffer: new ArrayBuffer(0), contentType: "application/x-line-home-ai-r2-limit" };
   }
 
@@ -73,24 +66,47 @@ async function send(url: string, env: Env, body: unknown, retryKey?: string): Pr
   return { ok: res.ok || res.status === 409, status: res.status, sent, text };
 }
 
-export async function replyText(env: Env, replyToken: string, text: string): Promise<{ok:boolean;status:number;sent:SentMessage[];text:string}> {
-  const messages = splitLineText(text).map((part) => ({ type: "text", text: part }));
+export function lineTextParts(texts: string[]): string[] {
+  const parts: string[] = [];
+  for (const text of texts) {
+    for (const part of splitLineText(text)) {
+      if (parts.length >= 5) return parts;
+      parts.push(part);
+    }
+  }
+  return parts;
+}
+
+export async function replyTexts(env: Env, replyToken: string, texts: string[]): Promise<{ok:boolean;status:number;sent:SentMessage[];text:string}> {
+  const messages = lineTextParts(texts).map((text) => ({ type: "text", text }));
   return send("https://api.line.me/v2/bot/message/reply", env, { replyToken, messages });
 }
 
-export async function pushText(env: Env, groupId: string, text: string, retryKey: string): Promise<{ok:boolean;status:number;sent:SentMessage[];text:string}> {
-  const messages = splitLineText(text).map((part) => ({ type: "text", text: part }));
+export async function pushTexts(env: Env, groupId: string, texts: string[], retryKey: string): Promise<{ok:boolean;status:number;sent:SentMessage[];text:string}> {
+  const messages = lineTextParts(texts).map((text) => ({ type: "text", text }));
   return send("https://api.line.me/v2/bot/message/push", env, { to: groupId, messages }, retryKey);
 }
 
-export async function sendBestEffort(env: Env, groupId: string, replyToken: string | undefined, eventTimestamp: number, text: string, retryKey: string): Promise<SentMessage[]> {
+export async function replyText(env: Env, replyToken: string, text: string): Promise<{ok:boolean;status:number;sent:SentMessage[];text:string}> {
+  return replyTexts(env, replyToken, [text]);
+}
+
+export async function pushText(env: Env, groupId: string, text: string, retryKey: string): Promise<{ok:boolean;status:number;sent:SentMessage[];text:string}> {
+  return pushTexts(env, groupId, [text], retryKey);
+}
+
+export async function sendBestEffortTexts(env: Env, groupId: string, replyToken: string | undefined, eventTimestamp: number, texts: string[], retryKey: string): Promise<SentMessage[]> {
   const age = Date.now() - eventTimestamp;
   if (replyToken && age < 50_000) {
-    const r = await replyText(env, replyToken, text);
+    const r = await replyTexts(env, replyToken, texts);
     if (r.ok) return r.sent;
     if (r.status !== 400) throw new Error(`LINE reply failed: ${r.status} ${r.text}`);
   }
-  const p = await pushText(env, groupId, text, retryKey);
+  const p = await pushTexts(env, groupId, texts, retryKey);
   if (!p.ok) throw new Error(`LINE push failed: ${p.status} ${p.text}`);
   return p.sent;
+}
+
+export async function sendBestEffort(env: Env, groupId: string, replyToken: string | undefined, eventTimestamp: number, text: string, retryKey: string): Promise<SentMessage[]> {
+  return sendBestEffortTexts(env, groupId, replyToken, eventTimestamp, [text], retryKey);
 }
