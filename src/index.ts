@@ -27,14 +27,29 @@ export default {
   async fetch(request:Request,env:Env):Promise<Response>{
     const url=new URL(request.url);
     if(url.pathname==="/health"){
-      await ensureSchema(env);
       const required = {
         LINE_CHANNEL_ID: Boolean(env.LINE_CHANNEL_ID),
         LINE_CHANNEL_SECRET: Boolean(env.LINE_CHANNEL_SECRET),
         GEMINI_API_KEY: Boolean(env.GEMINI_API_KEY),
         SETUP_CODE: Boolean(env.SETUP_CODE),
       };
-      return Response.json({ok:true,ready:Object.values(required).every(Boolean),service:"line-home-ai",model:env.GEMINI_MODEL,version:"1.0.0",configuration:required});
+      let database = true;
+      try {
+        await ensureSchema(env);
+      } catch (error) {
+        database = false;
+        console.error("health schema initialization failed", error);
+      }
+      const configured = Object.values(required).every(Boolean);
+      return Response.json({
+        ok: database,
+        ready: database && configured,
+        service:"line-home-ai",
+        model:env.GEMINI_MODEL,
+        version:"1.0.1",
+        database,
+        configuration:required,
+      }, { status: database ? 200 : 503 });
     }
     if(url.pathname==="/webhook"&&request.method==="POST") return webhook(request,env);
     return new Response("Not Found",{status:404});
