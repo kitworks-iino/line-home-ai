@@ -152,20 +152,20 @@ const MEMORY_SCHEMA = {
   additionalProperties:false,
   properties:{
     summary:{type:"string"},
-    memories:{type:"array",items:{type:"object",additionalProperties:false,properties:{
+    memories:{type:"array",maxItems:8,items:{type:"object",additionalProperties:false,properties:{
       action:{type:"string",enum:["upsert","delete"]},
       subject_key:{type:"string"},
       memory_key:{type:"string"},
       content:{type:"string"},
       confidence:{type:"number"},
-      source_message_ids:{type:"array",items:{type:"string"}}
+      source_message_ids:{type:"array",maxItems:100,items:{type:"string"}}
     },required:["action","subject_key","memory_key","content","confidence","source_message_ids"]}}
   },required:["summary","memories"]
 };
 
 export async function extractMemory(env: Env, prompt: string): Promise<MemoryExtraction> {
   const text = await interaction(env, {
-    system_instruction: "あなたは家庭内会話の記憶管理器です。永続価値のある事実・嗜好・予定・合意・人間関係・継続中の課題だけを抽出してください。雑談、推測、一時的感情、センシティブ情報の不必要な推測は記憶しません。既存記憶と矛盾する新情報は同じmemory_keyでupsertしてください。撤回が明示された場合はdelete。source_message_idsは根拠となる実在IDのみ。subject_keyは家族共通ならfamily、個人なら提示されたuser_idを厳密に使います。",
+    system_instruction: "あなたは家庭内会話の記憶管理器です。永続価値のある事実・嗜好・予定・合意・人間関係・継続中の課題だけを抽出してください。雑談、推測、一時的感情、センシティブ情報の不必要な推測は記憶しません。既存記憶と矛盾する新情報は同じmemory_keyでupsertしてください。撤回が明示された場合はdelete。変更候補は重要度順に最大8件です。source_message_idsは根拠となる実在IDのみ。subject_keyは家族共通ならfamily、個人なら提示されたuser_idを厳密に使います。",
     input: prompt,
     generation_config: { thinking_level: "low" },
     response_format: { type:"text", mime_type:"application/json", schema: MEMORY_SCHEMA },
