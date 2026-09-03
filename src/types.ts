@@ -14,6 +14,7 @@ export interface Env {
   MEMORY_BATCH_SIZE: string;
   RECENT_MESSAGE_LIMIT: string;
   MAX_MEDIA_CONTEXT: string;
+  R2_STORAGE_HARD_LIMIT_BYTES: string;
 }
 
 export interface LineQueuePayload {
