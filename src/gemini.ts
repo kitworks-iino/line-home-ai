@@ -3,6 +3,7 @@ import { base64FromArrayBuffer, safeJson } from "./util.js";
 
 const INTERACTIONS = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const INLINE_MAX = 8 * 1024 * 1024;
+const R2_LIMIT_MARKER_MIME = "application/x-line-home-ai-r2-limit";
 
 export type GeminiInput = {type:"text";text:string} | {type:"image"|"audio"|"video"|"document";mime_type:string;data?:string;uri?:string};
 
@@ -113,6 +114,10 @@ export async function mediaInputs(env: Env, messages: MessageRow[], max: number)
     const buf = await obj.arrayBuffer();
     const mime = m.mime_type!;
     inputs.push({ type:"text", text:`添付メディア: ${m.sender_name} が送信した ${m.type} (message_id=${m.line_message_id}, mime=${mime})` });
+    if (mime === R2_LIMIT_MARKER_MIME) {
+      inputs.push({type:"text", text:"この添付はCloudflare R2 Standardの無料ストレージ上限10 GBを超えないため、バイナリ本体を保存していません。内容そのものは参照できません。必要なら /usage で現在のR2保存量を確認してください。"});
+      continue;
+    }
     if (isTextLike(mime)) {
       const decoded = new TextDecoder().decode(buf);
       const clipped = decoded.length > 200_000 ? `${decoded.slice(0,200_000)}\n[以降省略]` : decoded;

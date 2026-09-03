@@ -18,6 +18,7 @@ The repository is designed so that after Git deployment, the human setup is **UI
 - Replies only when explicitly called (`@Home AI`, `GPT、`, `AI、`), `/deep`, or when you quote/reply to an AI message.
 - Supports LINE text, location, sticker metadata, images, audio, video and files.
 - Stores binary media in R2 and includes recent relevant media in Gemini multimodal context.
+- Keeps R2 binary storage at or below the full **10 GB Standard free-storage boundary** (`10,000,000,000` bytes) instead of using an arbitrary safety margin; `/usage` shows actual R2 object bytes.
 - Separates raw chat history, summaries and long-term memory.
 - Runs memory maintenance as separate Queue jobs so it does not consume the LINE reply path's D1 query/latency budget.
 - Invalidates derived memory and summaries when the originating LINE message is unsent.
@@ -34,6 +35,8 @@ The intended deployment is a **dedicated group containing only the two household
 **[UI-only production setup guide / UIだけで行う本番セットアップ](docs/SETUP.md)**
 
 Design details: **[Architecture](docs/ARCHITECTURE.md)**
+
+R2 billing/free-tier behavior: **[R2 Free Tier](docs/R2_FREE_TIER.md)**
 
 ## Required Cloudflare secrets
 

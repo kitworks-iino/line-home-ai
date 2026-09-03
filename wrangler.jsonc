@@ -11,7 +11,8 @@
     "BOT_DISPLAY_NAME": "Home AI",
     "MEMORY_BATCH_SIZE": "24",
     "RECENT_MESSAGE_LIMIT": "40",
-    "MAX_MEDIA_CONTEXT": "3"
+    "MAX_MEDIA_CONTEXT": "3",
+    "R2_STORAGE_HARD_LIMIT_BYTES": "10000000000"
   },
   "d1_databases": [
     { "binding": "DB" }

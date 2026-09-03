@@ -1,5 +1,6 @@
 import type { Env, GroupRow, MemberRow, ThinkingLevel } from "./types.js";
 import { approveJoin, createJoinRequest, deactivateMemory, getBoundGroup, getGroup, listMembers, listMemories, rejectJoin, setPersona, setThinking, stats, upsertMemory } from "./db.js";
+import { formatDecimalBytes, r2HardLimitBytes, r2StorageUsage } from "./r2-guard.js";
 import { normalizeThinking } from "./util.js";
 
 export interface CommandContext {
@@ -23,6 +24,7 @@ const HELP = `Home AI コマンド
 /persona [内容|reset] — AIの家族固有指示（管理者）
 /thinking low|medium|high — 通常の推論強度（管理者）
 /status — 稼働状態・保存件数
+/usage — R2添付ストレージの実使用量とハード上限
 /delete-data DELETE ALL — 全データ削除（管理者）
 
 通常会話では @Home AI、または文頭の「GPT、」「AI、」で呼び出せます。AIの直前の返信を引用して返信した場合も会話を継続します。難しい質問は文頭に /deep と付けられます。`;
@@ -96,6 +98,12 @@ export async function runCommand(ctx: CommandContext, name: string, args: string
       const m=requireMember(ctx); if(typeof m==="string") return {text:m};
       const s=await stats(env,groupId); const members=await listMembers(env,groupId); const group=await getGroup(env,groupId);
       return {text:`Home AI 稼働中\nモデル: ${env.GEMINI_MODEL}\nThinking: ${group?.thinking_level ?? env.DEFAULT_THINKING_LEVEL}\n登録メンバー: ${members.length}/2\n保存メッセージ: ${s.messages}\n有効な長期記憶: ${s.memories}\n要約セグメント: ${s.summaries}`};
+    }
+    case "usage": {
+      const m=requireMember(ctx); if(typeof m==="string") return {text:m};
+      const usage=await r2StorageUsage(env); const limit=r2HardLimitBytes(env);
+      const percent=limit>0 ? Math.min(100,(usage.bytes/limit)*100) : 0;
+      return {text:`R2 添付ストレージ\n保存量: ${formatDecimalBytes(usage.bytes)} / ${formatDecimalBytes(limit)}\n使用率: ${percent.toFixed(3)}%\nオブジェクト数: ${usage.objects}\nハード上限: Cloudflare R2 Standard 無料ストレージ枠と同じ 10 GB\n\n注: R2の無料枠超過は自動停止ではなく従量課金です。このHome AIは保存前にR2実オブジェクト容量を確認し、10 GBを超えるバイナリ保存だけ停止します。Class A/B操作数はCloudflare側の月次メーターが正式値です。`};
     }
     case "delete-data": {
       const admin=requireAdmin(ctx); if(typeof admin==="string") return {text:admin};
