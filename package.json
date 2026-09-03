@@ -7,7 +7,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "rm -rf .test-dist && tsc --outDir .test-dist --noEmit false && node --test tests/*.test.mjs",
-    "check": "npm run typecheck && npm test",
+    "dry-run": "wrangler deploy --dry-run --outdir dist",
+    "check": "npm run typecheck && npm test && npm run dry-run",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
   },
