@@ -51,7 +51,34 @@ Gemini 3.7 FlashにはFree Tierがありますが、Free Tierにはレート制�
 
 ---
 
-## 3. CloudflareへGitHubリポジトリを接続する
+## 3. CloudflareでR2を有効化する
+
+**初回だけ必要です。ここを飛ばすと、Workerの初回Deploy時に `Please enable R2 through the Cloudflare Dashboard. [code: 10042]` で失敗します。**
+
+1. Cloudflare Dashboard → **Storage & databases → R2 → Overview** を開きます。
+2. **R2サブスクリプションをアカウントに追加する** を選びます。
+3. 画面上の開始時合計が `$0.00` で、R2 Standardの無料使用量が含まれていることを確認して有効化します。
+4. **Bucketは手作業で作成しません。** 後続のWrangler deployが `MEDIA` bucketを自動プロビジョニングします。
+
+### 重要: 「無料枠」は自動停止ではない
+
+R2 subscriptionはPay-as-you-goです。Cloudflare R2の無料枠を超えても、Cloudflareが容量超過エラーで自動停止するわけではなく、超過分は従量課金されます。CloudflareのBudget Alertも通知だけで、ハード上限ではありません。
+
+2026-09-03時点のR2 Standard無料枠:
+
+- Storage: **10 GB-month / month**
+- Class A: **1,000,000 operations / month**
+- Class B: **10,000,000 operations / month**
+- Egress: free
+- DeleteObject: free operation
+
+Home AIはR2を当初設計どおり維持しつつ、Storageについては**任意の安全余裕を取らず、無料枠そのものと同じ10,000,000,000 bytesをアプリ側ハード上限**にしています。新規添付の保存前にR2の実オブジェクト容量を全ページ集計し、保存後に10GBを超える場合だけバイナリ本体を保存しません。
+
+詳細: [R2 Free Tier / 課金境界の扱い](R2_FREE_TIER.md)
+
+---
+
+## 4. CloudflareへGitHubリポジトリを接続する
 
 Cloudflare Dashboardで以下を行います。
 
@@ -61,8 +88,9 @@ Cloudflare Dashboardで以下を行います。
 4. リポジトリ `kitworks-iino/line-home-ai` を選択します。
 5. Production branchを `main` にします。
 6. Worker名は **`line-home-ai`** にします。`wrangler.jsonc` の `name` と一致させます。
-7. Deploy commandは **`npx wrangler deploy`** を使用します。
-8. Deployします。
+7. Build commandは空欄で構いません。
+8. Deploy commandは **`npx wrangler deploy`** を使用します。
+9. Deployします。
 
 ### D1 / R2 / Queuesは手作業で作らない
 
@@ -81,7 +109,7 @@ Cloudflare Dashboardで以下を行います。
 
 ---
 
-## 4. Cloudflareへ4つのSecretを設定する
+## 5. Cloudflareへ4つのSecretを設定する
 
 初回Deploy後、Cloudflare Dashboardで対象Worker `line-home-ai` を開きます。
 
@@ -104,12 +132,13 @@ Cloudflare Dashboardで以下を行います。
 - `MEMORY_BATCH_SIZE=24`
 - `RECENT_MESSAGE_LIMIT=40`
 - `MAX_MEDIA_CONTEXT=3`
+- `R2_STORAGE_HARD_LIMIT_BYTES=10000000000`
 
 CloudflareがSecret変更に対する再Deployを要求した場合は実行します。
 
 ---
 
-## 5. `/health` でCloudflare側の準備完了を確認する
+## 6. `/health` でCloudflare側の準備完了を確認する
 
 WorkerのURLは通常、次の形式です。
 
@@ -134,7 +163,7 @@ WorkerのURLは通常、次の形式です。
 
 ---
 
-## 6. LINE Webhookを接続する
+## 7. LINE Webhookを接続する
 
 LINE Developers Console → 対象Messaging APIチャネル → **Messaging API設定** で次を行います。
 
@@ -150,7 +179,7 @@ LINEの検証時に `events: []` のWebhookが来ても、このWorkerは正常�
 
 ---
 
-## 7. Home AIを家族専用LINEグループへ追加する
+## 8. Home AIを家族専用LINEグループへ追加する
 
 1. 飯野さん・とちょだけの専用LINEグループを作成します。
 2. `Home AI` のLINE公式アカウントを追加します。
@@ -178,13 +207,19 @@ adminが送信:
 
 ---
 
-## 8. 動作確認
+## 9. 動作確認
 
 まず次を送ります。
 
 `/status`
 
 登録メンバーが `2/2` になっていることを確認します。
+
+続いてR2の実使用量も確認します。
+
+`/usage`
+
+初期状態ではほぼ0 GB / 10 GBになります。
 
 その後、たとえば次を試します。
 
@@ -198,10 +233,11 @@ adminが送信:
 
 ---
 
-## 9. 運用コマンド
+## 10. 運用コマンド
 
 - `/help` — コマンド一覧
 - `/status` — 稼働状態と保存件数
+- `/usage` — R2の実保存量 / 10GBハード上限 / オブジェクト数
 - `/members` — 承認済みメンバー
 - `/memories [検索語]` — 長期記憶を確認
 - `/remember 内容` — 明示的に長期記憶へ追加
@@ -213,7 +249,7 @@ adminが送信:
 
 ---
 
-## 10. LINEの送信取消への追従
+## 11. LINEの送信取消への追従
 
 承認済みユーザーがLINEでメッセージを送信取消した場合、Webhookのunsend eventを受けて次を処理します。
 
@@ -227,7 +263,7 @@ adminが送信:
 
 ---
 
-## 11. 家庭データを完全削除する
+## 12. 家庭データを完全削除する
 
 adminが正確に次を送ります。
 
@@ -253,8 +289,10 @@ adminが正確に次を送ります。
 この構成は無料枠内で開始できますが、各社の無料上限は存在します。
 
 - Gemini Free Tier: レート制限あり
-- Cloudflare Workers / D1 / R2 / Queues: Free planの上限あり
+- Cloudflare Workers / D1 / R2 / Queues: Free plan / included usageの上限あり
 - LINE: 通常のReplyはPushとは課金・通数の扱いが異なります。Reply tokenの安全時間を超えた場合だけHome AIはPushへフォールバックするため、そのPushはLINE公式アカウント側の月間送信枠を消費します。
+
+R2について、**Storageは10GBのアプリ側ハード上限を実装済み**です。一方、Class A/Bの月次正式値はCloudflareの課金メーターがauthoritativeです。このアプリの通常アクセスは1添付あたり数回程度で、無料枠（A 100万 / B 1000万）に対して家族2人用途では非常に小さい想定です。`/usage` はR2の実オブジェクト容量を表示しますが、Cloudflareアカウント全体の正式なClass A/B請求値を置き換えるものではありません。
 
 記憶処理はLINE返信処理とは別Queue invocationへ分離し、D1の1 invocationあたりquery上限を圧迫しない設計にしています。Queue consumerは家族チャット用途では処理順序・冪等性を優先して `max_concurrency=1` です。
 
@@ -269,6 +307,7 @@ adminが正確に次を送ります。
 - [ ] グループトーク参加を許可した
 - [ ] Channel ID / Channel secretを取得した
 - [ ] Gemini API keyを取得した
+- [ ] CloudflareでR2 subscriptionを有効化した（R2 bucket自体は手作成していない）
 - [ ] Cloudflareへ `kitworks-iino/line-home-ai` をGit接続した
 - [ ] Worker名を `line-home-ai` にした
 - [ ] Production branchを `main` にした
@@ -279,3 +318,4 @@ adminが正確に次を送ります。
 - [ ] `/setup SETUP_CODE` に成功した
 - [ ] 2人目の `/join` → `/approve CODE` に成功した
 - [ ] `/status` で登録メンバーが2/2になった
+- [ ] `/usage` でR2保存量を確認できた
