@@ -9,12 +9,15 @@ test('Gemini current Interactions request contract',async(t)=>{
     calls.push([url,init]);
     return new Response(JSON.stringify({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'ok'}]}]}),{status:200});
   });
-  const env={GEMINI_API_KEY:'g',GEMINI_MODEL:'gemini-3.7-flash'};
-  assert.equal(await answer(env,'system','prompt',[],'high'),'ok');
+  const env={GEMINI_API_KEY:'g',GEMINI_MODEL:'gemini-flash-latest',GEMINI_FALLBACK_MODELS:''};
+  const result=await answer(env,'system','prompt',[],'high');
+  assert.equal(result.text,'ok');
+  assert.equal(result.model,'gemini-flash-latest');
+  assert.deepEqual(result.exhaustedModels,[]);
   const [url,init]=calls[0];
   assert.equal(String(url),'https://generativelanguage.googleapis.com/v1beta/interactions');
   const body=JSON.parse(String(init.body));
-  assert.equal(body.model,'gemini-3.7-flash');
+  assert.equal(body.model,'gemini-flash-latest');
   assert.equal(body.store,false);
   assert.equal(body.system_instruction,'system');
   assert.deepEqual(body.generation_config,{thinking_level:'high'});
