@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "line-home-ai",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-01",
+  "compatibility_date": "2026-09-03",
   "workers_dev": true,
   "observability": { "enabled": true },
   "vars": {
