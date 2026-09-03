@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "line-home-ai",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-03",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "vars": {
+    "GEMINI_MODEL": "gemini-3.7-flash",
+    "DEFAULT_THINKING_LEVEL": "medium",
+    "BOT_DISPLAY_NAME": "Home AI",
+    "MEMORY_BATCH_SIZE": "24",
+    "RECENT_MESSAGE_LIMIT": "40",
+    "MAX_MEDIA_CONTEXT": "3"
+  },
+  "d1_databases": [
+    { "binding": "DB" }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA" }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "EVENT_QUEUE", "queue": "line-home-ai-events" }
+    ],
+    "consumers": [
+      {
+        "queue": "line-home-ai-events",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "line-home-ai-dead-letter",
+        "max_concurrency": 1
+      }
+    ]
+  }
+}
