@@ -4,6 +4,7 @@ import { base64FromArrayBuffer, safeJson } from "./util.js";
 const INTERACTIONS = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const INLINE_MAX = 8 * 1024 * 1024;
 const R2_LIMIT_MARKER_MIME = "application/x-line-home-ai-r2-limit";
+const INTERACTION_ATTEMPTS = 4;
 
 export type GeminiInput = {type:"text";text:string} | {type:"image"|"audio"|"video"|"document";mime_type:string;data?:string;uri?:string};
 
@@ -12,6 +13,12 @@ interface InteractionResponse {
   status?: string;
   error?: { message?: string };
   steps?: Array<{type:string;content?:Array<{type:string;text?:string}>}>;
+}
+
+class GeminiInteractionError extends Error {
+  constructor(public readonly status: number, public readonly raw: string) {
+    super(`Gemini interaction failed: ${status} ${raw}`);
+  }
 }
 
 function outputText(response: InteractionResponse): string {
@@ -23,18 +30,44 @@ function outputText(response: InteractionResponse): string {
   return chunks.join("\n").trim();
 }
 
+function retryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function retryDelayMs(status: number, attempt: number, retryAfter: string | null): number {
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(60_000, Math.max(1_000, seconds * 1000));
+  }
+  const rateLimitDelays = [15_000, 30_000, 60_000];
+  const serverDelays = [2_000, 5_000, 10_000];
+  return status === 429
+    ? rateLimitDelays[Math.min(attempt, rateLimitDelays.length - 1)]!
+    : serverDelays[Math.min(attempt, serverDelays.length - 1)]!;
+}
+
 async function interaction(env: Env, body: Record<string,unknown>): Promise<string> {
-  const res = await fetch(INTERACTIONS, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-    body: JSON.stringify({ model: env.GEMINI_MODEL || "gemini-3.7-flash", store: false, ...body }),
-  });
-  const raw = await res.text();
-  if (!res.ok) throw new Error(`Gemini interaction failed: ${res.status} ${raw}`);
-  const json = safeJson<InteractionResponse>(raw);
-  const text = outputText(json);
-  if (!text) throw new Error(`Gemini returned no text output (status=${json.status ?? "unknown"})`);
-  return text;
+  for (let attempt = 0; attempt < INTERACTION_ATTEMPTS; attempt++) {
+    const res = await fetch(INTERACTIONS, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({ model: env.GEMINI_MODEL || "gemini-3.7-flash", store: false, ...body }),
+    });
+    const raw = await res.text();
+    if (res.ok) {
+      const json = safeJson<InteractionResponse>(raw);
+      const text = outputText(json);
+      if (!text) throw new Error(`Gemini returned no text output (status=${json.status ?? "unknown"})`);
+      return text;
+    }
+
+    if (!retryableStatus(res.status) || attempt === INTERACTION_ATTEMPTS - 1) {
+      throw new GeminiInteractionError(res.status, raw);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(res.status, attempt, res.headers.get("retry-after"))));
+  }
+  throw new Error("Gemini interaction exhausted retries unexpectedly");
 }
 
 function mediaType(mime: string): "image"|"audio"|"video"|"document"|null {
@@ -140,11 +173,27 @@ export async function mediaInputs(env: Env, messages: MessageRow[], max: number)
 }
 
 export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel): Promise<string> {
-  return interaction(env, {
-    system_instruction: systemInstruction,
-    input: [{type:"text",text:prompt}, ...media],
-    generation_config: { thinking_level: thinking },
-  });
+  try {
+    return await interaction(env, {
+      system_instruction: systemInstruction,
+      input: [{type:"text",text:prompt}, ...media],
+      generation_config: { thinking_level: thinking },
+    });
+  } catch (error) {
+    if (error instanceof GeminiInteractionError) {
+      if (error.status === 429) {
+        return "Gemini APIの利用上限またはレート制限に達したため、今回は回答を生成できませんでした。少し時間を空けてもう一度呼びかけてください。";
+      }
+      if (error.status >= 500) {
+        return `Gemini API側の一時障害（HTTP ${error.status}）で回答を生成できませんでした。少し時間を空けてもう一度呼びかけてください。`;
+      }
+      return `Gemini APIへの接続でHTTP ${error.status}エラーが発生したため、回答を生成できませんでした。設定またはAPI状態の確認が必要です。`;
+    }
+    if (error instanceof Error && error.message.startsWith("Gemini returned no text output")) {
+      return "Geminiから有効なテキスト回答を取得できませんでした。もう一度呼びかけてください。";
+    }
+    throw error;
+  }
 }
 
 export interface MemoryExtraction {
