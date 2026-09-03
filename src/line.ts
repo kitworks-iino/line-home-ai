@@ -1,4 +1,5 @@
 import type { Env } from "./types.js";
+import { canStoreWithinR2Limit, r2HardLimitBytes, r2StorageUsage } from "./r2-guard.js";
 import { splitLineText } from "./util.js";
 
 let tokenCache: { token: string; expiresAt: number } | null = null;
@@ -41,7 +42,21 @@ export async function getGroupMemberProfile(env: Env, groupId: string, userId: s
 export async function getMessageContent(env: Env, messageId: string): Promise<{buffer:ArrayBuffer;contentType:string}> {
   const res = await lineFetch(env, `https://api-data.line.me/v2/bot/message/${encodeURIComponent(messageId)}/content`);
   if (!res.ok) throw new Error(`LINE content fetch failed: ${res.status} ${await res.text()}`);
-  return { buffer: await res.arrayBuffer(), contentType: res.headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream" };
+  const buffer = await res.arrayBuffer();
+  const contentType = res.headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream";
+
+  // R2's 10 GB-month free storage allowance is usage-based billing, not a hard platform quota.
+  // Keep the bucket's instantaneous object bytes at or below 10,000,000,000 bytes so the
+  // daily-peak average used for GB-month billing cannot exceed the storage free tier.
+  const usage = await r2StorageUsage(env);
+  const limit = r2HardLimitBytes(env);
+  if (!canStoreWithinR2Limit(usage.bytes, buffer.byteLength, limit)) {
+    // Persist a zero-byte marker instead of the binary. This keeps normal message processing,
+    // unsend cleanup and conversation history intact without adding billable storage bytes.
+    return { buffer: new ArrayBuffer(0), contentType: "application/x-line-home-ai-r2-limit" };
+  }
+
+  return { buffer, contentType };
 }
 
 export interface SentMessage { id: string; quoteToken?: string }
