@@ -41,11 +41,19 @@
 3. APIキーを作成します。
 4. 後でCloudflareのSecret `GEMINI_API_KEY` に入れるため控えます。
 
-既定モデルは `gemini-3.7-flash` です。実装はGemini Interactions APIを `store:false` で使用します。
+通常会話のプライマリは特定バージョンへ固定せず `gemini-flash-latest` を使います。Googleがこのaliasの参照先を新しいFlashへ更新すると、Home AIもコード変更なしでそのモデルへ移行します。
+
+利用上限（HTTP 429）に達した場合は、同じモデルを無駄に再試行せず、`GEMINI_FALLBACK_MODELS` に設定した下位モデルへ順番に切り替えます。下位モデルで回答できた場合、LINEには「どのモデルへ切り替えたか」の通知を先に表示し、その次に本来の回答を表示します。
+
+長期記憶の抽出・要約は通常会話とは分離し、`GEMINI_MEMORY_MODEL` で指定したモデルを使います。既定値は `gemini-3.5-flash-lite` です。
+
+詳細: [Gemini model routing](MODEL_ROUTING.md)
 
 ### 無料枠とプライバシー
 
-Gemini 3.7 FlashにはFree Tierがありますが、Free Tierにはレート制限があります。またGoogleはFree Tierの送信内容を製品改善に利用する場合があると説明しています。家庭内会話をその条件で送信したくない場合は、有料Tierまたは別の実行基盤へ切り替えてください。
+Gemini Free TierにはモデルごとのRPM・TPM・RPD等のレート制限があります。Home AIは429発生時に同一モデルへ繰り返しリクエストして枠を余計に消費しない設計です。
+
+またGoogleはFree Tierの送信内容を製品改善に利用する場合があると説明しています。家庭内会話をその条件で送信したくない場合は、有料Tierまたは別の実行基盤へ切り替えてください。
 
 このアプリ自身が勝手に有料プランへアップグレードすることはありません。
 
@@ -126,7 +134,9 @@ Cloudflare Dashboardで以下を行います。
 
 以下は `wrangler.jsonc` に設定済みなので通常は変更不要です。
 
-- `GEMINI_MODEL=gemini-3.7-flash`
+- `GEMINI_MODEL=gemini-flash-latest`
+- `GEMINI_FALLBACK_MODELS=gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite`
+- `GEMINI_MEMORY_MODEL=gemini-3.5-flash-lite`
 - `DEFAULT_THINKING_LEVEL=medium`
 - `BOT_DISPLAY_NAME=Home AI`
 - `MEMORY_BATCH_SIZE=24`
@@ -153,7 +163,13 @@ WorkerのURLは通常、次の形式です。
 ```json
 {
   "ok": true,
-  "ready": true
+  "ready": true,
+  "model": "gemini-flash-latest",
+  "modelRouting": {
+    "primary": "gemini-flash-latest",
+    "fallbacks": ["..."],
+    "memory": "gemini-3.5-flash-lite"
+  }
 }
 ```
 
@@ -258,64 +274,3 @@ adminが送信:
 - そのメッセージを根拠にした自動長期記憶を無効化
 - そのメッセージを根拠にした要約を削除
 - 派生source linkを削除
-
-手動で登録した `/remember` は自動抽出記憶とは別扱いです。
-
----
-
-## 12. 家庭データを完全削除する
-
-adminが正確に次を送ります。
-
-`/delete-data DELETE ALL`
-
-削除対象:
-
-- D1の会話ログ
-- 要約
-- 長期記憶
-- 記憶・要約の出典リンク
-- メンバー設定
-- Webhook処理状態
-- R2の当該グループ配下メディア
-- WorkerとLINEグループのbinding
-
-削除後に再利用する場合は `/setup SETUP_CODE` からやり直します。
-
----
-
-## 無料枠で使う場合の注意
-
-この構成は無料枠内で開始できますが、各社の無料上限は存在します。
-
-- Gemini Free Tier: レート制限あり
-- Cloudflare Workers / D1 / R2 / Queues: Free plan / included usageの上限あり
-- LINE: 通常のReplyはPushとは課金・通数の扱いが異なります。Reply tokenの安全時間を超えた場合だけHome AIはPushへフォールバックするため、そのPushはLINE公式アカウント側の月間送信枠を消費します。
-
-R2について、**Storageは10GBのアプリ側ハード上限を実装済み**です。一方、Class A/Bの月次正式値はCloudflareの課金メーターがauthoritativeです。このアプリの通常アクセスは1添付あたり数回程度で、無料枠（A 100万 / B 1000万）に対して家族2人用途では非常に小さい想定です。`/usage` はR2の実オブジェクト容量を表示しますが、Cloudflareアカウント全体の正式なClass A/B請求値を置き換えるものではありません。
-
-記憶処理はLINE返信処理とは別Queue invocationへ分離し、D1の1 invocationあたりquery上限を圧迫しない設計にしています。Queue consumerは家族チャット用途では処理順序・冪等性を優先して `max_concurrency=1` です。
-
----
-
-## 最終チェックリスト
-
-すべてYESなら利用開始できます。
-
-- [ ] LINE公式アカウントを作成した
-- [ ] Messaging APIを有効化した
-- [ ] グループトーク参加を許可した
-- [ ] Channel ID / Channel secretを取得した
-- [ ] Gemini API keyを取得した
-- [ ] CloudflareでR2 subscriptionを有効化した（R2 bucket自体は手作成していない）
-- [ ] Cloudflareへ `kitworks-iino/line-home-ai` をGit接続した
-- [ ] Worker名を `line-home-ai` にした
-- [ ] Production branchを `main` にした
-- [ ] Cloudflareへ4つのSecretを登録した
-- [ ] `/health` が `ready:true` になった
-- [ ] LINE Webhook URLを登録してVerifyに成功した
-- [ ] 家族専用LINEグループへHome AIを追加した
-- [ ] `/setup SETUP_CODE` に成功した
-- [ ] 2人目の `/join` → `/approve CODE` に成功した
-- [ ] `/status` で登録メンバーが2/2になった
-- [ ] `/usage` でR2保存量を確認できた
