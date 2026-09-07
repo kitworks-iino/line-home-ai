@@ -23,6 +23,7 @@ export interface Env {
   GEMINI_DEEP_DEADLINE_MS: string;
   GEMINI_MEMORY_TIMEOUT_MS: string;
   LINE_API_TIMEOUT_MS: string;
+  IMPLICIT_FOLLOWUP_WINDOW_MS: string;
 }
 
 export interface LineQueuePayload {

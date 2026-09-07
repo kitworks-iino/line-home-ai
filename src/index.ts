@@ -1,5 +1,6 @@
 import type { Env, LineQueuePayload, LineWebhookBody, QueuePayload } from "./types.js";
 import { ensureSchema } from "./schema.js";
+import { DEFAULT_IMPLICIT_FOLLOWUP_WINDOW_MS } from "./invocation.js";
 import { modelRoute } from "./model-routing.js";
 import { processQueuePayload } from "./processor.js";
 import { boundedMs } from "./timeout.js";
@@ -50,7 +51,7 @@ export default {
         service:"line-home-ai",
         model:routing.primary,
         modelRouting:routing,
-        version:"1.2.0",
+        version:"1.2.1",
         database,
         queues:{reply:"line-home-ai-events",memory:"line-home-ai-memory",isolated:true},
         latency:{
@@ -59,6 +60,11 @@ export default {
           deepReplyDeadlineMs:boundedMs(env.GEMINI_DEEP_DEADLINE_MS,180_000,30_000,300_000),
           memoryTimeoutMs:boundedMs(env.GEMINI_MEMORY_TIMEOUT_MS,45_000,10_000,120_000),
           lineApiTimeoutMs:boundedMs(env.LINE_API_TIMEOUT_MS,10_000,3_000,30_000),
+        },
+        invocation:{
+          implicitFollowup:true,
+          implicitFollowupWindowMs:boundedMs(env.IMPLICIT_FOLLOWUP_WINDOW_MS,DEFAULT_IMPLICIT_FOLLOWUP_WINDOW_MS,30_000,3_600_000),
+          rule:"immediate unquoted turn after Home AI",
         },
         configuration:required,
       }, { status: database ? 200 : 503 });
@@ -71,9 +77,6 @@ export default {
     for(const message of batch.messages){
       const started=Date.now();
       try{
-        // Migration safety: older deployments put memory jobs on the reply queue.
-        // Drain them immediately into the new memory queue instead of letting a stale
-        // long-running memory job block fresh LINE replies after this deployment.
         if(batch.queue==="line-home-ai-events" && message.body.kind==="memory"){
           await env.MEMORY_QUEUE.send(message.body,{contentType:"json"});
           message.ack();

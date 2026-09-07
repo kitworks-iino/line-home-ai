@@ -15,7 +15,8 @@ The repository is designed so that after Git deployment, the human setup is **UI
 - Lives in one dedicated LINE family group.
 - Distinguishes the two approved people by LINE `userId`.
 - Stores approved-member ordinary conversation as context without interrupting it.
-- Replies only when explicitly called (`@Home AI`, `GPT、`, `AI、`), `/deep`, or when you quote/reply to an AI message.
+- Starts an AI turn when explicitly called (`@Home AI`, `GPT、`, `AI、`, typed `HOME-AI`), via `/deep`, or by quoting/replying to an AI message.
+- Once Home AI has just replied, the next unquoted household message is treated as a natural follow-up for up to 10 minutes, so ordinary back-and-forth does not require another `@Home AI` on every turn. A reply/quote or explicit LINE mention directed at the other household member suppresses this adjacency inference.
 - Supports LINE text, location, sticker metadata, images, audio, video and files.
 - Stores binary media in R2 and includes recent relevant media in Gemini multimodal context.
 - Keeps R2 binary storage at or below the full **10 GB Standard free-storage boundary** (`10,000,000,000` bytes) instead of using an arbitrary safety margin; `/usage` shows actual R2 object bytes.
@@ -59,7 +60,7 @@ R2 billing/free-tier behavior: **[R2 Free Tier](docs/R2_FREE_TIER.md)**
 
 ## Health endpoint
 
-`GET /health` — returns `ready:true` only when all four required secrets are present and includes the configured primary/fallback/memory model route.
+`GET /health` — returns `ready:true` only when all four required secrets are present and includes the configured model route, isolated Queue state, latency bounds and implicit follow-up configuration.
 
 ## Webhook endpoint
 
