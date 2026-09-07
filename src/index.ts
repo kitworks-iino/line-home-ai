@@ -71,6 +71,15 @@ export default {
     for(const message of batch.messages){
       const started=Date.now();
       try{
+        // Migration safety: older deployments put memory jobs on the reply queue.
+        // Drain them immediately into the new memory queue instead of letting a stale
+        // long-running memory job block fresh LINE replies after this deployment.
+        if(batch.queue==="line-home-ai-events" && message.body.kind==="memory"){
+          await env.MEMORY_QUEUE.send(message.body,{contentType:"json"});
+          message.ack();
+          console.log(`queue_message_migrated from=${batch.queue} to=line-home-ai-memory elapsedMs=${Date.now()-started}`);
+          continue;
+        }
         await processQueuePayload(env,message.body);
         message.ack();
         console.log(`queue_message_complete queue=${batch.queue} attempts=${message.attempts} elapsedMs=${Date.now()-started}`);
