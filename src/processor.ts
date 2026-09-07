@@ -26,6 +26,7 @@ import {
 import { runCommand } from "./commands.js";
 import { conversationPrompt, memoryExtractionPrompt, systemInstruction } from "./context.js";
 import { answer, extractMemory, mediaInputs } from "./gemini.js";
+import { DEFAULT_IMPLICIT_FOLLOWUP_WINDOW_MS, isImplicitAssistantFollowup, mentionsAnotherUser } from "./invocation.js";
 import { allModelsExhaustedNotice, allModelsUnavailableNotice, fallbackNotice } from "./model-routing.js";
 import { getGroupMemberProfile, getMessageContent, lineTextParts, sendBestEffortTexts } from "./line.js";
 import {
@@ -82,6 +83,14 @@ function decodeDeliveryMessages(value: string): string[] {
     // Fall through and surface the cached string rather than losing a response.
   }
   return [value];
+}
+
+async function previousMessageBefore(env: Env, groupId: string, saved: MessageRow): Promise<MessageRow | null> {
+  return env.DB.prepare(`SELECT * FROM messages
+    WHERE group_id=? AND unsent=0 AND id<>? AND created_at<=?
+    ORDER BY created_at DESC,line_message_id DESC LIMIT 1`)
+    .bind(groupId, saved.id, saved.created_at)
+    .first<MessageRow>();
 }
 
 async function removeGroupMedia(env: Env, groupId: string): Promise<void> {
@@ -315,7 +324,7 @@ async function handleCommand(
         : "セットアップに失敗しました。";
     }
     await deliver(env, eventKey, groupId, payload.event.replyToken, payload.event.timestamp, text, false);
-    await completeEvent(env, eventKey);
+    await completeEvent(env, key);
     return { handled: true };
   }
 
@@ -405,6 +414,23 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
     if (textMessage(event.message)) invoked ||= hasSelfMention(event.message) || hasNaturalInvocation(event.message.text);
     const quoted = quotedMessageId(event.message);
     if (!invoked && quoted) invoked = await isAssistantMessage(env, groupId, quoted);
+
+    if (!invoked && !quoted) {
+      const targetsAnotherUser = textMessage(event.message) && mentionsAnotherUser(event.message);
+      if (!targetsAnotherUser) {
+        const previous = await previousMessageBefore(env, groupId, saved);
+        const followupWindowMs = asInt(
+          env.IMPLICIT_FOLLOWUP_WINDOW_MS,
+          DEFAULT_IMPLICIT_FOLLOWUP_WINDOW_MS,
+          30_000,
+          3_600_000,
+        );
+        invoked = isImplicitAssistantFollowup(previous, event.timestamp, null, followupWindowMs);
+        if (invoked) {
+          console.log(`line_implicit_followup key=${key} previousRole=${previous?.role ?? "none"} ageMs=${previous ? event.timestamp - previous.created_at : -1}`);
+        }
+      }
+    }
 
     if (!invoked) {
       await enqueueMemoryMaintenance(env, groupId);
