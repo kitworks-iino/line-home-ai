@@ -324,7 +324,7 @@ async function handleCommand(
         : "セットアップに失敗しました。";
     }
     await deliver(env, eventKey, groupId, payload.event.replyToken, payload.event.timestamp, text, false);
-    await completeEvent(env, key);
+    await completeEvent(env, eventKey);
     return { handled: true };
   }
 
