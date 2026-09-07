@@ -7,6 +7,12 @@ export interface ModelRoute {
 }
 
 export type QuotaScope = "minute" | "day" | "unknown";
+export type RouteFailureReason = "quota" | "timeout" | "upstream";
+
+export interface RouteFailure {
+  model: string;
+  reason: RouteFailureReason;
+}
 
 export interface ModelQuotaBlock {
   blockedUntil: number;
@@ -58,15 +64,28 @@ export function modelDisplayName(model: string): string {
   return model;
 }
 
-export function fallbackNotice(newlyExhaustedModels: string[], activeModel: string): string | null {
-  if (newlyExhaustedModels.length === 0) return null;
-  const chain = [...newlyExhaustedModels, activeModel].map(modelDisplayName).join(" → ");
-  return `利用上限（レート制限）に達したため、会話モデルを切り替えます。\n${chain}\n今回は ${modelDisplayName(activeModel)} が対応します！`;
+function reasonText(reason: RouteFailureReason): string {
+  if (reason === "quota") return "利用上限（レート制限）";
+  if (reason === "timeout") return "応答タイムアウト";
+  return "一時的なAPI障害";
+}
+
+export function fallbackNotice(failures: RouteFailure[], activeModel: string): string | null {
+  if (failures.length === 0) return null;
+  const chain = [...failures.map((failure) => modelDisplayName(failure.model)), modelDisplayName(activeModel)].join(" → ");
+  const reasons = [...new Set(failures.map((failure) => reasonText(failure.reason)))].join("・");
+  return `上位モデルで${reasons}が発生したため、会話モデルを切り替えます。\n${chain}\n今回は ${modelDisplayName(activeModel)} が対応します！`;
 }
 
 export function allModelsExhaustedNotice(models: string[]): string {
   const chain = models.map(modelDisplayName).join(" → ");
   return `会話用モデルの利用上限（レート制限）に達しました。\n現在利用できないモデル: ${chain}\n利用枠が回復してから、もう一度呼びかけてください。`;
+}
+
+export function allModelsUnavailableNotice(failures: RouteFailure[], fallbackText: string): string {
+  if (failures.length === 0) return fallbackText;
+  const details = failures.map((failure) => `${modelDisplayName(failure.model)}: ${reasonText(failure.reason)}`).join(" / ");
+  return `${fallbackText}\n${details}`;
 }
 
 function retryDelayMs(raw: string): number | null {
@@ -140,8 +159,6 @@ export function nextPacificQuotaResetMs(now: number): number {
   const day = nextDate.getUTCDate();
   const localMidnightAsUtc = Date.UTC(year, month, day, 0, 0, 0);
 
-  // Start near Pacific midnight, then resolve the actual UTC offset. Re-evaluating once
-  // handles PST/PDT correctly for normal and DST-transition dates.
   let candidate = Date.UTC(year, month, day, 8, 0, 0);
   for (let i = 0; i < 2; i++) {
     const offset = timeZoneOffsetMinutes(candidate, timeZone);
