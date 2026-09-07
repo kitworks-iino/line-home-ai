@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   allModelsExhaustedNotice,
+  allModelsUnavailableNotice,
   conversationModels,
   fallbackNotice,
   memoryModel,
@@ -22,19 +23,38 @@ test('memory model is independent from conversation primary model',()=>{
   assert.equal(memoryModel({GEMINI_MEMORY_MODEL:'gemini-3.5-flash-lite'}),'gemini-3.5-flash-lite');
 });
 
-test('model names and fallback notice are readable in LINE',()=>{
+test('model names and quota fallback notice are readable in LINE',()=>{
   assert.equal(modelDisplayName('gemini-flash-latest'),'Gemini Flash 最新版');
   assert.equal(modelDisplayName('gemini-3.7-flash'),'Gemini 3.7 Flash');
   assert.equal(modelDisplayName('gemini-3.5-flash-lite'),'Gemini 3.5 Flash-Lite');
-  const notice=fallbackNotice(['gemini-flash-latest','gemini-3.7-flash'],'gemini-3.6-flash');
+  const notice=fallbackNotice([
+    {model:'gemini-flash-latest',reason:'quota'},
+    {model:'gemini-3.7-flash',reason:'quota'},
+  ],'gemini-3.6-flash');
+  assert.match(notice,/利用上限/);
   assert.match(notice,/Gemini Flash 最新版 → Gemini 3\.7 Flash → Gemini 3\.6 Flash/);
   assert.match(notice,/今回は Gemini 3\.6 Flash が対応します/);
+});
+
+test('timeout fallback notice clearly distinguishes timeout from quota',()=>{
+  const notice=fallbackNotice([{model:'gemini-flash-latest',reason:'timeout'}],'gemini-3.7-flash');
+  assert.match(notice,/応答タイムアウト/);
+  assert.match(notice,/Gemini Flash 最新版 → Gemini 3\.7 Flash/);
 });
 
 test('all-exhausted notice includes unavailable model chain',()=>{
   const notice=allModelsExhaustedNotice(['gemini-flash-latest','gemini-3.7-flash']);
   assert.match(notice,/Gemini Flash 最新版 → Gemini 3\.7 Flash/);
   assert.match(notice,/現在利用できないモデル/);
+});
+
+test('all-unavailable notice exposes per-model reasons',()=>{
+  const notice=allModelsUnavailableNotice([
+    {model:'gemini-flash-latest',reason:'timeout'},
+    {model:'gemini-3.7-flash',reason:'upstream'},
+  ],'時間内に回答できませんでした。');
+  assert.match(notice,/応答タイムアウト/);
+  assert.match(notice,/一時的なAPI障害/);
 });
 
 test('per-minute 429 honors RetryInfo and adds a small safety second',()=>{

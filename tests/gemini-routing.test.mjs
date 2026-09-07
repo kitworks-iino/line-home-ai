@@ -51,6 +51,7 @@ test('429 immediately falls through to the next model instead of retrying the ex
     assert.equal(result.model,'gemini-3.7-flash');
     assert.deepEqual(result.exhaustedModels,['gemini-flash-latest']);
     assert.deepEqual(result.newlyExhaustedModels,['gemini-flash-latest']);
+    assert.deepEqual(result.routeFailures,[{model:'gemini-flash-latest',reason:'quota'}]);
     assert.equal(result.allModelsExhausted,false);
   }finally{
     globalThis.fetch=originalFetch;
@@ -77,6 +78,34 @@ test('a persisted quota block skips the known-exhausted model without another AP
     assert.equal(result.model,'gemini-3.7-flash');
     assert.deepEqual(result.exhaustedModels,['gemini-flash-latest']);
     assert.deepEqual(result.newlyExhaustedModels,[]);
+    assert.deepEqual(result.routeFailures,[{model:'gemini-flash-latest',reason:'quota'}]);
+  }finally{
+    globalThis.fetch=originalFetch;
+  }
+});
+
+test('524 from the latest model falls through instead of returning after the origin timeout',async()=>{
+  const originalFetch=globalThis.fetch;
+  const calls=[];
+  globalThis.fetch=async(_url,init)=>{
+    const body=JSON.parse(init.body);
+    calls.push(body.model);
+    if(calls.length===1) return new Response('timeout',{status:524});
+    return okInteraction('lower model after timeout');
+  };
+  try{
+    const env={
+      GEMINI_API_KEY:'test',
+      GEMINI_MODEL:'gemini-flash-latest',
+      GEMINI_FALLBACK_MODELS:'gemini-3.7-flash',
+      GEMINI_MODEL_TIMEOUT_MS:'45000',
+      GEMINI_REPLY_DEADLINE_MS:'90000',
+    };
+    const result=await answer(env,'system','prompt',[],'medium');
+    assert.deepEqual(calls,['gemini-flash-latest','gemini-3.7-flash']);
+    assert.equal(result.model,'gemini-3.7-flash');
+    assert.equal(result.text,'lower model after timeout');
+    assert.deepEqual(result.routeFailures,[{model:'gemini-flash-latest',reason:'timeout'}]);
   }finally{
     globalThis.fetch=originalFetch;
   }

@@ -1,7 +1,8 @@
-import type { Env, LineWebhookBody, QueuePayload } from "./types.js";
+import type { Env, LineQueuePayload, LineWebhookBody, QueuePayload } from "./types.js";
 import { ensureSchema } from "./schema.js";
 import { modelRoute } from "./model-routing.js";
 import { processQueuePayload } from "./processor.js";
+import { boundedMs } from "./timeout.js";
 import { constantTimeEqual } from "./util.js";
 
 async function verifyLineSignature(rawBody:string,signature:string,secret:string):Promise<boolean>{
@@ -18,7 +19,7 @@ async function webhook(request:Request,env:Env):Promise<Response>{
   let body:LineWebhookBody;
   try{body=JSON.parse(raw) as LineWebhookBody;}catch{return new Response("invalid json",{status:400});}
   for(const event of body.events??[]){
-    const payload:QueuePayload={destination:body.destination,event,receivedAt:Date.now()};
+    const payload:LineQueuePayload={destination:body.destination,event,receivedAt:Date.now()};
     await env.EVENT_QUEUE.send(payload,{contentType:"json"});
   }
   return new Response("OK",{status:200});
@@ -49,8 +50,16 @@ export default {
         service:"line-home-ai",
         model:routing.primary,
         modelRouting:routing,
-        version:"1.1.0",
+        version:"1.2.0",
         database,
+        queues:{reply:"line-home-ai-events",memory:"line-home-ai-memory",isolated:true},
+        latency:{
+          modelTimeoutMs:boundedMs(env.GEMINI_MODEL_TIMEOUT_MS,45_000,10_000,90_000),
+          normalReplyDeadlineMs:boundedMs(env.GEMINI_REPLY_DEADLINE_MS,90_000,20_000,180_000),
+          deepReplyDeadlineMs:boundedMs(env.GEMINI_DEEP_DEADLINE_MS,180_000,30_000,300_000),
+          memoryTimeoutMs:boundedMs(env.GEMINI_MEMORY_TIMEOUT_MS,45_000,10_000,120_000),
+          lineApiTimeoutMs:boundedMs(env.LINE_API_TIMEOUT_MS,10_000,3_000,30_000),
+        },
         configuration:required,
       }, { status: database ? 200 : 503 });
     }
@@ -58,10 +67,25 @@ export default {
     return new Response("Not Found",{status:404});
   },
   async queue(batch:MessageBatch<QueuePayload>,env:Env):Promise<void>{
+    console.log(`queue_batch_start queue=${batch.queue} size=${batch.messages.length}`);
     for(const message of batch.messages){
-      try{await processQueuePayload(env,message.body);message.ack();}
+      const started=Date.now();
+      try{
+        // Migration safety: older deployments put memory jobs on the reply queue.
+        // Drain them immediately into the new memory queue instead of letting a stale
+        // long-running memory job block fresh LINE replies after this deployment.
+        if(batch.queue==="line-home-ai-events" && message.body.kind==="memory"){
+          await env.MEMORY_QUEUE.send(message.body,{contentType:"json"});
+          message.ack();
+          console.log(`queue_message_migrated from=${batch.queue} to=line-home-ai-memory elapsedMs=${Date.now()-started}`);
+          continue;
+        }
+        await processQueuePayload(env,message.body);
+        message.ack();
+        console.log(`queue_message_complete queue=${batch.queue} attempts=${message.attempts} elapsedMs=${Date.now()-started}`);
+      }
       catch(err){
-        console.error("queue processing failed",err);
+        console.error(`queue_processing_failed queue=${batch.queue} attempts=${message.attempts} elapsedMs=${Date.now()-started}`,err);
         const delaySeconds=Math.min(60,Math.max(2,2 ** Math.min(message.attempts,5)));
         message.retry({delaySeconds});
       }

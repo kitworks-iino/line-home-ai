@@ -1,14 +1,24 @@
 import type { Env } from "./types.js";
 import { canStoreWithinR2Limit, r2HardLimitBytes, r2StorageUsage } from "./r2-guard.js";
+import { boundedMs, fetchWithTimeout } from "./timeout.js";
 import { splitLineText } from "./util.js";
 
 let tokenCache: { token: string; expiresAt: number } | null = null;
+
+function lineApiTimeoutMs(env: Env): number {
+  return boundedMs(env.LINE_API_TIMEOUT_MS, 10_000, 3_000, 30_000);
+}
 
 async function lineToken(env: Env): Promise<string> {
   const now = Date.now();
   if (tokenCache && tokenCache.expiresAt > now + 60_000) return tokenCache.token;
   const body = new URLSearchParams({ grant_type: "client_credentials", client_id: env.LINE_CHANNEL_ID, client_secret: env.LINE_CHANNEL_SECRET });
-  const res = await fetch("https://api.line.me/oauth2/v3/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+  const res = await fetchWithTimeout(
+    "https://api.line.me/oauth2/v3/token",
+    { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body },
+    lineApiTimeoutMs(env),
+    "LINE token API",
+  );
   if (!res.ok) throw new Error(`LINE token issue failed: ${res.status} ${await res.text()}`);
   const json = await res.json() as { access_token: string; expires_in: number };
   tokenCache = { token: json.access_token, expiresAt: now + json.expires_in * 1000 };
@@ -20,7 +30,7 @@ async function lineFetch(env: Env, url: string, init: RequestInit = {}): Promise
     const token = await lineToken(env);
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${token}`);
-    return fetch(url, { ...init, headers });
+    return fetchWithTimeout(url, { ...init, headers }, lineApiTimeoutMs(env), "LINE Messaging API");
   };
   let res = await execute();
   if (res.status === 401) {
@@ -31,10 +41,15 @@ async function lineFetch(env: Env, url: string, init: RequestInit = {}): Promise
 }
 
 export async function getGroupMemberProfile(env: Env, groupId: string, userId: string): Promise<string> {
-  const res = await lineFetch(env, `https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(userId)}`);
-  if (!res.ok) return `LINE user ${userId.slice(-6)}`;
-  const j = await res.json() as { displayName?: string };
-  return j.displayName?.trim() || `LINE user ${userId.slice(-6)}`;
+  try {
+    const res = await lineFetch(env, `https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(userId)}`);
+    if (!res.ok) return `LINE user ${userId.slice(-6)}`;
+    const j = await res.json() as { displayName?: string };
+    return j.displayName?.trim() || `LINE user ${userId.slice(-6)}`;
+  } catch (error) {
+    console.warn("LINE profile lookup failed; continuing with fallback display name", error);
+    return `LINE user ${userId.slice(-6)}`;
+  }
 }
 
 export async function getMessageContent(env: Env, messageId: string): Promise<{buffer:ArrayBuffer;contentType:string}> {
