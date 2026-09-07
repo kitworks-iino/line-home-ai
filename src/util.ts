@@ -46,7 +46,7 @@ export function hasSelfMention(message: LineTextMessage): boolean {
   return message.mention?.mentionees.some((m) => m.type === "user" && m.isSelf === true) ?? false;
 }
 
-const INVOCATION = /^\s*(?:gpt|ＧＰＴ|ai|ＡＩ|home\s*ai|ホーム\s*ai)(?=$|[\s、,，。.!！?？:：])/iu;
+const INVOCATION = /^\s*(?:gpt|ＧＰＴ|ai|ＡＩ|home(?:[\s_-]*)ai|ホーム(?:[\s_-]*)ai)(?=$|[\s、,，。.!！?？:：])/iu;
 
 export function hasNaturalInvocation(text: string): boolean {
   return INVOCATION.test(text);
