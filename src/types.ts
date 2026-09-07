@@ -3,7 +3,8 @@ export type ThinkingLevel = "low" | "medium" | "high";
 export interface Env {
   DB: D1Database;
   MEDIA: R2Bucket;
-  EVENT_QUEUE: Queue<QueuePayload>;
+  EVENT_QUEUE: Queue<LineQueuePayload>;
+  MEMORY_QUEUE: Queue<MemoryQueuePayload>;
   LINE_CHANNEL_ID: string;
   LINE_CHANNEL_SECRET: string;
   GEMINI_API_KEY: string;
@@ -17,6 +18,11 @@ export interface Env {
   RECENT_MESSAGE_LIMIT: string;
   MAX_MEDIA_CONTEXT: string;
   R2_STORAGE_HARD_LIMIT_BYTES: string;
+  GEMINI_MODEL_TIMEOUT_MS: string;
+  GEMINI_REPLY_DEADLINE_MS: string;
+  GEMINI_DEEP_DEADLINE_MS: string;
+  GEMINI_MEMORY_TIMEOUT_MS: string;
+  LINE_API_TIMEOUT_MS: string;
 }
 
 export interface LineQueuePayload {
