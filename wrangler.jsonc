@@ -14,7 +14,12 @@
     "MEMORY_BATCH_SIZE": "24",
     "RECENT_MESSAGE_LIMIT": "40",
     "MAX_MEDIA_CONTEXT": "3",
-    "R2_STORAGE_HARD_LIMIT_BYTES": "10000000000"
+    "R2_STORAGE_HARD_LIMIT_BYTES": "10000000000",
+    "GEMINI_MODEL_TIMEOUT_MS": "45000",
+    "GEMINI_REPLY_DEADLINE_MS": "90000",
+    "GEMINI_DEEP_DEADLINE_MS": "180000",
+    "GEMINI_MEMORY_TIMEOUT_MS": "45000",
+    "LINE_API_TIMEOUT_MS": "10000"
   },
   "d1_databases": [
     { "binding": "DB" }
@@ -24,7 +29,8 @@
   ],
   "queues": {
     "producers": [
-      { "binding": "EVENT_QUEUE", "queue": "line-home-ai-events" }
+      { "binding": "EVENT_QUEUE", "queue": "line-home-ai-events" },
+      { "binding": "MEMORY_QUEUE", "queue": "line-home-ai-memory" }
     ],
     "consumers": [
       {
@@ -33,6 +39,14 @@
         "max_batch_timeout": 1,
         "max_retries": 5,
         "dead_letter_queue": "line-home-ai-dead-letter",
+        "max_concurrency": 1
+      },
+      {
+        "queue": "line-home-ai-memory",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 3,
+        "dead_letter_queue": "line-home-ai-memory-dead-letter",
         "max_concurrency": 1
       }
     ]
