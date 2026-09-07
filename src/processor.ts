@@ -26,7 +26,7 @@ import {
 import { runCommand } from "./commands.js";
 import { conversationPrompt, memoryExtractionPrompt, systemInstruction } from "./context.js";
 import { answer, extractMemory, mediaInputs } from "./gemini.js";
-import { allModelsExhaustedNotice, fallbackNotice } from "./model-routing.js";
+import { allModelsExhaustedNotice, allModelsUnavailableNotice, fallbackNotice } from "./model-routing.js";
 import { getGroupMemberProfile, getMessageContent, lineTextParts, sendBestEffortTexts } from "./line.js";
 import {
   asInt,
@@ -193,10 +193,12 @@ async function persistIncoming(
 }
 
 async function enqueueMemoryMaintenance(env: Env, groupId: string): Promise<void> {
-  await env.EVENT_QUEUE.send({ kind: "memory", groupId, requestedAt: Date.now() }, { contentType: "json" });
+  await env.MEMORY_QUEUE.send({ kind: "memory", groupId, requestedAt: Date.now() }, { contentType: "json" });
 }
 
 async function maintainMemory(env: Env, groupId: string): Promise<void> {
+  const started = Date.now();
+  console.log(`memory_job_start group=${groupId}`);
   const batchSize = asInt(env.MEMORY_BATCH_SIZE, 24, 4, 100);
   const cursor = await env.DB.prepare(
     "SELECT memory_cursor_at,memory_cursor_message_id FROM groups WHERE group_id=?",
@@ -210,12 +212,18 @@ async function maintainMemory(env: Env, groupId: string): Promise<void> {
     .bind(groupId, cursor.memory_cursor_at, cursor.memory_cursor_at, cursor.memory_cursor_message_id, batchSize)
     .all<MessageRow>();
   const messages = rows.results ?? [];
-  if (messages.length < batchSize) return;
+  if (messages.length < batchSize) {
+    console.log(`memory_job_skip group=${groupId} pending=${messages.length} elapsedMs=${Date.now() - started}`);
+    return;
+  }
 
   const members = await listMembers(env, groupId);
   const existing = await listMemories(env, groupId, "", 120);
   const extracted = await extractMemory(env, memoryExtractionPrompt(messages, existing, members));
-  if (!extracted) return;
+  if (!extracted) {
+    console.log(`memory_job_postponed group=${groupId} elapsedMs=${Date.now() - started}`);
+    return;
+  }
   const sourceSet = new Set(messages.map((m) => m.line_message_id));
   const allSources = [...sourceSet];
   const last = messages[messages.length - 1]!;
@@ -262,6 +270,7 @@ async function maintainMemory(env: Env, groupId: string): Promise<void> {
   statements.push(env.DB.prepare("UPDATE groups SET memory_cursor_at=?,memory_cursor_message_id=? WHERE group_id=?")
     .bind(last.created_at, last.line_message_id, groupId));
   await env.DB.batch(statements);
+  console.log(`memory_job_complete group=${groupId} elapsedMs=${Date.now() - started}`);
 }
 
 async function handleDeleteAll(env: Env, eventKey: string, groupId: string, payload: LineQueuePayload, text: string): Promise<void> {
@@ -342,6 +351,8 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
   const event = payload.event;
   const groupId = groupIdOf(payload);
   const key = eventId(payload);
+  const started = Date.now();
+  console.log(`line_event_start key=${key} webhookAgeMs=${Date.now() - payload.receivedAt}`);
   const claimed = await claimEvent(env, key, groupId, event.type);
   if (claimed === "done") return;
 
@@ -419,17 +430,21 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
       const media = await mediaInputs(env, recent, maxMedia);
       try {
         const thinking: ThinkingLevel = deepPrompt ? "high" : group.thinking_level;
+        console.log(`line_ai_start key=${key} thinking=${thinking} elapsedMs=${Date.now() - started}`);
         const generated = await answer(env, systemInstruction(group, members), prompt, media.inputs, thinking);
         let response: string;
-        if (generated.allModelsExhausted || !generated.model) {
+        if (generated.allModelsExhausted) {
           response = allModelsExhaustedNotice(generated.exhaustedModels);
+        } else if (!generated.model) {
+          response = allModelsUnavailableNotice(generated.routeFailures, generated.text || "Gemini APIから時間内に回答を取得できませんでした。もう一度呼びかけてください。");
         } else {
-          const notice = fallbackNotice(generated.exhaustedModels, generated.model);
+          const notice = fallbackNotice(generated.routeFailures, generated.model);
           response = notice
             ? encodeDeliveryMessages([notice, generated.text])
             : capLineResponse(generated.text);
         }
         await cacheEventResponse(env, key, response);
+        console.log(`line_ai_cached key=${key} model=${generated.model ?? "none"} elapsedMs=${Date.now() - started}`);
       } finally {
         await media.cleanup();
       }
@@ -438,9 +453,11 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
 
     if (!state?.response_text) throw new Error("AI response was not cached");
     await deliver(env, key, groupId, event.replyToken, event.timestamp, state.response_text, true);
+    console.log(`line_delivery_complete key=${key} elapsedMs=${Date.now() - started}`);
     await enqueueMemoryMaintenance(env, groupId);
     await completeEvent(env, key);
   } catch (error) {
+    console.error(`line_event_failed key=${key} elapsedMs=${Date.now() - started}`, error);
     await failEvent(env, key).catch(() => undefined);
     throw error;
   }
