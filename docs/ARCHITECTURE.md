@@ -13,10 +13,26 @@ A private household AI that lives in one LINE group and is usable by exactly two
 5. LINE-event jobs handle authorization, persistence, AI invocation and delivery. Long-term-memory maintenance is sent to a physically separate Queue (`line-home-ai-memory`) so a slow memory extraction cannot occupy the reply consumer.
 6. D1 keeps idempotency (`webhookEventId`), membership, messages, summaries, memories and persistent Gemini quota blocks.
 7. Binary LINE content is copied into R2 under `groups/{groupId}/media/{messageId}`.
-8. The AI is invoked only on an explicit bot @mention, a natural prefix (`GPT、`, `AI、`, `Home AI ...`), `/deep`, or a quoted reply to a previous AI message.
+8. An AI turn starts on an explicit bot @mention, a natural prefix (`GPT、`, `AI、`, `Home AI`, `HOME-AI`), `/deep`, a quoted reply to a previous AI message, or an implicit conversational follow-up as described below.
 9. Normal conversation uses the configured Gemini Flash routing chain through the Interactions API with `store:false`. The primary is `gemini-flash-latest`; quota exhaustion, a model timeout, HTTP 524, or a transient upstream failure can move the request to the next configured model.
 10. Long-term-memory extraction uses a separate configured model (`GEMINI_MEMORY_MODEL`) and does not consume the primary conversation model's quota. A memory-model quota/timeout/transient outage postpones extraction without advancing the memory cursor.
 11. The Worker attempts a LINE Reply while its reply token is fresh. If processing exceeded the safe reply window, it uses Push as a fallback. When a conversation fallback succeeds, the LINE response contains a model-switch notice first, followed by the requested answer from the lower model.
+
+## Natural conversation turns
+
+Requiring `@Home AI` on every message makes a household conversation unnatural, so explicit invocation is only required to start or re-start a conversation.
+
+After Home AI sends a message, the **next unquoted household message** is treated as directed to Home AI when it arrives within `IMPLICIT_FOLLOWUP_WINDOW_MS` (default **10 minutes**). Because Home AI replies to that turn, natural back-and-forth can continue without repeated mentions.
+
+The inference is intentionally conservative:
+
+- The immediately preceding stored conversation message must be from Home AI.
+- A LINE quote/reply is handled by its explicit target. Quoting another household member does not implicitly invoke Home AI.
+- If the current text explicitly @mentions the other household member, adjacency inference is suppressed.
+- An old Home AI message does not make unrelated later household chat invoke the bot; the default continuity window is 10 minutes.
+- The lookup only considers messages at or before the current LINE event timestamp, so a later AI reply generated while another event is waiting in the Queue cannot retroactively turn that earlier human message into an implicit invocation.
+
+This makes messages such as `うるさい！`, `それ違う`, `じゃあどうする？`, a sticker, or a photo sent immediately after Home AI's answer behave like a normal conversational reply without requiring another `@`.
 
 ## Bounded latency
 
@@ -89,9 +105,9 @@ There is one unavoidable distributed-system boundary: LINE and D1 cannot partici
 
 ## Observability
 
-The Worker logs explicit stage timings for Queue start/completion, LINE-event age, Gemini request start/end, model timeout/fallback, memory jobs and LINE delivery. This allows a future delay to be classified as Queue backlog, Gemini latency, LINE API latency or application failure without inferring from a screenshot alone.
+The Worker logs explicit stage timings for Queue start/completion, LINE-event age, Gemini request start/end, model timeout/fallback, implicit follow-up detection, memory jobs and LINE delivery. This allows a future delay to be classified as Queue backlog, Gemini latency, LINE API latency, invocation classification or application failure without inferring from a screenshot alone.
 
-`GET /health` exposes the active model route, queue isolation and configured latency bounds without exposing secrets.
+`GET /health` exposes the active model route, queue isolation, configured latency bounds and implicit follow-up window without exposing secrets.
 
 ## Cloudflare Free-plan query discipline
 
