@@ -31,13 +31,14 @@ type GeminiErrorCategory = "authentication" | "permission" | "billing" | "region
 function apiErrorDetails(raw: string): { code: string; message: string; fields: string[] } {
   try {
     const json = JSON.parse(raw) as {
+      status?: string; code?: string | number; message?: string; detail?: string;
       error?: { status?: string; code?: string | number; message?: string; details?: Array<{ reason?: string; fieldViolations?: Array<{ field?: string }> }> };
       errors?: Array<{ code?: string; message?: string }>;
     };
     const details = json.error?.details ?? [];
     return {
-      code: String(json.error?.status ?? json.errors?.[0]?.code ?? json.error?.code ?? "unknown"),
-      message: [json.error?.message, ...details.map((detail) => detail.reason), ...(json.errors ?? []).map((error) => `${error.code ?? ""} ${error.message ?? ""}`)].filter(Boolean).join(" "),
+      code: String(json.error?.status ?? json.errors?.[0]?.code ?? json.error?.code ?? json.status ?? json.code ?? "unknown"),
+      message: [json.error?.message, json.message, typeof json.detail === "string" ? json.detail : "", ...details.map((detail) => detail.reason), ...(json.errors ?? []).map((error) => `${error.code ?? ""} ${error.message ?? ""}`)].filter(Boolean).join(" "),
       fields: details.flatMap((detail) => detail.fieldViolations ?? []).map((violation) => violation.field ?? "").filter(Boolean),
     };
   } catch {
