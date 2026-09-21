@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { answer } from '../.test-dist/gemini.js';
+import { answer, extractMemory, mediaInputs } from '../.test-dist/gemini.js';
 import { pushText, replyText } from '../.test-dist/line.js';
 
 test('Gemini current Interactions request contract',async(t)=>{
@@ -22,6 +22,53 @@ test('Gemini current Interactions request contract',async(t)=>{
   assert.equal(body.system_instruction,'system');
   assert.deepEqual(body.generation_config,{thinking_level:'high'});
   assert.deepEqual(body.input[0],{type:'text',text:'prompt'});
+});
+
+test('memory extraction uses the current structured output request contract',async(t)=>{
+  let request;
+  t.mock.method(globalThis,'fetch',async(_url,init)=>{
+    request=JSON.parse(init.body);
+    return new Response(JSON.stringify({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'{"summary":"家族の予定","memories":[]}'}]}]}),{status:200});
+  });
+  const result=await extractMemory({GEMINI_API_KEY:'g',GEMINI_MEMORY_MODEL:'gemini-3.5-flash-lite'},'context');
+  assert.deepEqual(result,{summary:'家族の予定',memories:[]});
+  assert.equal(request.model,'gemini-3.5-flash-lite');
+  assert.equal(request.response_format.type,'text');
+  assert.equal(request.response_format.mime_type,'application/json');
+  assert.deepEqual(request.response_format.schema.required,['summary','memories']);
+  assert.equal(request.store,false);
+});
+
+const attachment=(id,mime)=>({line_message_id:id,media_key:id,mime_type:mime,sender_name:'家族',type:mime.split('/')[0],unsent:0});
+const mediaEnv={MEDIA:{async get(){return {async arrayBuffer(){return new Uint8Array([1,2,3]).buffer;}};}}};
+
+test('zero media context excludes all previous attachments without reading storage',async()=>{
+  const env={MEDIA:{async get(){throw new Error('storage must not be read');}}};
+  const result=await mediaInputs(env,[attachment('a','image/png')],0);
+  assert.deepEqual(result.inputs,[]);
+  await result.cleanup();
+});
+
+test('supported MIME aliases and parameters are normalized before reaching Gemini',async()=>{
+  const messages=[attachment('a','Image/JPG; charset=binary'),attachment('b','audio/x-m4a'),attachment('c','video/quicktime')];
+  const result=await mediaInputs(mediaEnv,messages,3);
+  const binary=result.inputs.filter((input)=>input.type!=='text');
+  assert.deepEqual(binary.map((input)=>[input.type,input.mime_type]),[['image','image/jpeg'],['audio','audio/m4a'],['video','video/mov']]);
+  assert.equal(binary.length,3);
+});
+
+test('an unsupported historical attachment cannot poison every later text request with an invalid MIME',async(t)=>{
+  const result=await mediaInputs(mediaEnv,[attachment('svg','image/svg+xml'),attachment('audio','audio/mp4')],4);
+  assert.ok(result.inputs.every((input)=>input.type==='text'));
+  assert.match(result.inputs.map((input)=>input.text).join(' '),/対応外/);
+  let request;
+  t.mock.method(globalThis,'fetch',async(_url,init)=>{
+    request=JSON.parse(init.body);
+    return new Response(JSON.stringify({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'テキスト回答'}]}]}),{status:200});
+  });
+  const answerResult=await answer({GEMINI_API_KEY:'g',GEMINI_MODEL:'gemini-flash-latest',GEMINI_FALLBACK_MODELS:''},'system','こんにちは',result.inputs,'medium');
+  assert.equal(answerResult.text,'テキスト回答');
+  assert.ok(request.input.every((input)=>input.type==='text'));
 });
 
 test('LINE stateless token then reply contract',async(t)=>{

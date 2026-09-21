@@ -18,17 +18,108 @@ export type GeminiInput = {type:"text";text:string} | {type:"image"|"audio"|"vid
 export type RouteFailureReason = "quota" | "timeout" | "upstream";
 export interface RouteFailure { model: string; reason: RouteFailureReason }
 
-interface InteractionResponse {
+export interface InteractionResponse {
   id?: string;
   status?: string;
   error?: { message?: string };
+  errors?: Array<{ code?: string; message?: string }>;
   steps?: Array<{type:string;content?:Array<{type:string;text?:string}>}>;
 }
 
-class GeminiInteractionError extends Error {
-  constructor(public readonly status: number, public readonly raw: string, public readonly model: string) {
-    super(`Gemini interaction failed: model=${model} status=${status} ${raw}`);
+type GeminiErrorCategory = "authentication" | "permission" | "billing" | "region" | "thinking_unsupported" | "model_unavailable" | "invalid_request" | "quota" | "timeout" | "upstream" | "network" | "incomplete" | "blocked" | "invalid_response";
+
+function apiErrorDetails(raw: string): { code: string; message: string; fields: string[] } {
+  try {
+    const json = JSON.parse(raw) as {
+      error?: { status?: string; code?: string | number; message?: string; details?: Array<{ reason?: string; fieldViolations?: Array<{ field?: string }> }> };
+      errors?: Array<{ code?: string; message?: string }>;
+    };
+    const details = json.error?.details ?? [];
+    return {
+      code: String(json.error?.status ?? json.errors?.[0]?.code ?? json.error?.code ?? "unknown"),
+      message: [json.error?.message, ...details.map((detail) => detail.reason), ...(json.errors ?? []).map((error) => `${error.code ?? ""} ${error.message ?? ""}`)].filter(Boolean).join(" "),
+      fields: details.flatMap((detail) => detail.fieldViolations ?? []).map((violation) => violation.field ?? "").filter(Boolean),
+    };
+  } catch {
+    // Non-JSON failures are classified locally but never copied into logs or LINE replies.
+    return { code: "unknown", message: raw, fields: [] };
   }
+}
+
+function errorCategory(status: number, raw: string): GeminiErrorCategory {
+  const detail = apiErrorDetails(raw);
+  const message = `${detail.code} ${detail.message} ${detail.fields.join(" ")}`;
+  if (status === 401 || /API_KEY_(?:INVALID|EXPIRED)|API key.{0,60}(?:not valid|invalid|expired|leaked)|invalid.{0,20}API key/i.test(message)) return "authentication";
+  if (/location.{0,40}not supported|region.{0,40}not supported|unsupported.{0,20}(?:region|location)/i.test(message)) return "region";
+  if (status === 402 || /BILLING_DISABLED|billing.{0,50}(?:required|enabled|enable)|enable.{0,20}billing|paid tier|prepay.{0,20}credit/i.test(message)) return "billing";
+  if (status === 403) return "permission";
+  if (status === 429) return "quota";
+  if (status === 408 || status === 524) return "timeout";
+  if (/SAFETY|PROHIBITED_CONTENT|BLOCKLIST|CONTENT_BLOCKED/i.test(message)) return "blocked";
+  if (/INTERACTION_INCOMPLETE/i.test(message)) return "incomplete";
+  if (/INVALID_RESPONSE|EMPTY_OUTPUT/i.test(message)) return "invalid_response";
+  if (status >= 500) return "upstream";
+  if (status === 400 && /thinking[_ .-]?level|thinking config|thinking_config/i.test(message) && /not supported|unsupported|invalid|unknown|not allowed|only supports/i.test(message)) return "thinking_unsupported";
+  if ((status === 400 || status === 404) && /model/i.test(message) && /not found|not supported|unsupported|not available|unavailable|does not exist|deprecated|invalid model/i.test(message)) return "model_unavailable";
+  return "invalid_request";
+}
+
+export class GeminiInteractionError extends Error {
+  readonly category: GeminiErrorCategory;
+  #raw: string;
+  get raw(): string { return this.#raw; }
+  constructor(public readonly status: number, raw: string, public readonly model: string) {
+    const category = errorCategory(status, raw);
+    super(`Gemini interaction failed: model=${model} status=${status} category=${category}`);
+    this.name = "GeminiInteractionError";
+    this.category = category;
+    this.#raw = raw;
+  }
+}
+
+export interface GeminiFailureDiagnostic {
+  status: number;
+  category: GeminiErrorCategory;
+  model: string;
+  time: number;
+}
+
+export async function readLastGeminiError(env: Env): Promise<GeminiFailureDiagnostic | null> {
+  const db = (env as Partial<Env>).DB;
+  if (!db) return null;
+  const row = await db.prepare("SELECT value FROM app_state WHERE key=?").bind("last_gemini_error").first<{ value: string }>();
+  if (!row) return null;
+  try {
+    const value = JSON.parse(row.value) as GeminiFailureDiagnostic;
+    return typeof value.status === "number" && typeof value.category === "string" && typeof value.model === "string" && typeof value.time === "number" ? value : null;
+  } catch { return null; }
+}
+
+async function logApiFailure(env: Env, error: GeminiInteractionError): Promise<void> {
+  const details = apiErrorDetails(error.raw);
+  // API messages can echo input text, API keys and file URLs. Log only bounded identifiers.
+  const identifier = (value: string): string => /^[a-zA-Z0-9_.\[\]-]{1,100}$/.test(value) ? value : "redacted";
+  console.warn("gemini_api_failure", JSON.stringify({
+    model: error.model, status: error.status, category: error.category,
+    apiCode: identifier(details.code), fields: details.fields.slice(0,8).map(identifier),
+  }));
+  const db = (env as Partial<Env>).DB;
+  if (db) {
+    const diagnostic: GeminiFailureDiagnostic = { model: error.model, status: error.status, category: error.category, time: Date.now() };
+    await db.prepare(`INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`)
+      .bind("last_gemini_error", JSON.stringify(diagnostic), diagnostic.time).run()
+      .catch(() => console.warn("gemini_diagnostic_persist_failed"));
+  }
+}
+
+function failureReply(error: GeminiInteractionError): string {
+  const diagnostic = `（HTTP ${error.status} / ${error.category}）`;
+  if (error.category === "authentication") return `Gemini APIキーが無効・期限切れ・停止状態のため、回答できませんでした。管理者がGoogle AI StudioでAPIキーを確認する必要があります。${diagnostic}`;
+  if (error.category === "permission") return `Gemini APIへのアクセスが拒否されました。管理者がAPIキーの制限と対象プロジェクトの権限を確認する必要があります。${diagnostic}`;
+  if (error.category === "billing" || error.category === "region") return `現在のGemini APIプロジェクトでは、この機能を無料で利用できません。管理者が利用条件を確認する必要があります。自動で課金設定は変更していません。${diagnostic}`;
+  if (error.category === "blocked") return "Geminiがこの内容への回答を生成できませんでした。質問や添付内容を変えて、もう一度呼びかけてください。";
+  return `Gemini APIがリクエストを受け付けませんでした。管理者がAPI設定を確認する必要があります。${diagnostic}`;
 }
 
 export interface AnswerResult {
@@ -42,11 +133,11 @@ export interface AnswerResult {
   terminalReason: "quota" | "deadline" | "upstream" | null;
 }
 
-function outputText(response: InteractionResponse): string {
+export function outputText(response: InteractionResponse): string {
   const chunks: string[] = [];
   for (const step of response.steps ?? []) {
-    if (step.type !== "model_output") continue;
-    for (const block of step.content ?? []) if (block.type === "text" && block.text) chunks.push(block.text);
+    if (!step || step.type !== "model_output" || !Array.isArray(step.content)) continue;
+    for (const block of step.content) if (block?.type === "text" && typeof block.text === "string" && block.text) chunks.push(block.text);
   }
   return chunks.join("\n").trim();
 }
@@ -77,57 +168,120 @@ function memoryTimeoutMs(env: Env): number {
   return boundedMs(env.GEMINI_MEMORY_TIMEOUT_MS, 45_000, 10_000, 120_000);
 }
 
-async function interaction(
+export async function requestGeminiInteraction(
   env: Env,
   model: string,
   body: Record<string,unknown>,
   timeoutMs: number,
   attempts = TRANSIENT_ATTEMPTS,
-): Promise<string> {
-  for (let attempt = 0; attempt < attempts; attempt++) {
+): Promise<InteractionResponse> {
+  const deadline = Date.now() + timeoutMs;
+  let requestBody = body;
+  let thinkingRetried = false;
+  let transientRetries = 0;
+  for (let attempt = 0; ; attempt++) {
     const started = Date.now();
-    console.log(`gemini_request_start model=${model} attempt=${attempt + 1} timeoutMs=${timeoutMs}`);
-    let res: Response;
+    const remaining = deadline - started;
+    if (remaining <= 0) throw new UpstreamTimeoutError(`Gemini Interactions ${model}`, timeoutMs);
+    console.log(`gemini_request_start model=${model} attempt=${attempt + 1} timeoutMs=${remaining}`);
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let response: { res: Response; raw: string };
     try {
-      res = await fetchWithTimeout(
-        INTERACTIONS,
-        {
+      // Keep the deadline active through reading the response body, not just its headers.
+      response = await Promise.race([
+        fetch(INTERACTIONS, {
           method: "POST",
           headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-          body: JSON.stringify({ model, store: false, ...body }),
-        },
-        timeoutMs,
-        `Gemini Interactions ${model}`,
-      );
+          body: JSON.stringify({ ...requestBody, model, store: false }),
+          signal: controller.signal,
+        }).then(async (res) => ({ res, raw: await res.text() })),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new UpstreamTimeoutError(`Gemini Interactions ${model}`, timeoutMs));
+          }, remaining);
+        }),
+      ]);
     } catch (error) {
-      console.warn(`gemini_request_error model=${model} attempt=${attempt + 1} elapsedMs=${Date.now() - started}`, error);
+      console.warn(`gemini_request_error model=${model} attempt=${attempt + 1} category=${controller.signal.aborted ? "timeout" : "network"} elapsedMs=${Date.now() - started}`);
+      if (controller.signal.aborted || error instanceof UpstreamTimeoutError) throw new UpstreamTimeoutError(`Gemini Interactions ${model}`, timeoutMs);
+      const networkError = new GeminiInteractionError(503, '{"error":{"status":"UNAVAILABLE","message":"Network request failed"}}', model);
+      await logApiFailure(env, networkError);
+      throw networkError;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+
+    const { res, raw } = response;
+    console.log(`gemini_request_end model=${model} attempt=${attempt + 1} status=${res.status} elapsedMs=${Date.now() - started}`);
+    if (res.ok) {
+      let json: InteractionResponse;
+      try { json = JSON.parse(raw) as InteractionResponse; }
+      catch {
+        const error = new GeminiInteractionError(502, '{"error":{"status":"INVALID_RESPONSE"}}', model);
+        await logApiFailure(env, error);
+        throw error;
+      }
+      if (!json || typeof json !== "object") {
+        const error = new GeminiInteractionError(502, '{"error":{"status":"INVALID_RESPONSE"}}', model);
+        await logApiFailure(env, error);
+        throw error;
+      }
+      if (json.status && json.status !== "completed") {
+        const error = new GeminiInteractionError(502, JSON.stringify({ error: { status: `INTERACTION_${json.status.toUpperCase()}` }, errors: json.errors }), model);
+        await logApiFailure(env, error);
+        throw error;
+      }
+      if (!Array.isArray(json.steps) || !outputText(json)) {
+        const error = new GeminiInteractionError(502, '{"error":{"status":"EMPTY_OUTPUT"}}', model);
+        await logApiFailure(env, error);
+        throw error;
+      }
+      return json;
+    }
+
+    const error = new GeminiInteractionError(res.status, raw, model);
+    await logApiFailure(env, error);
+    const config = requestBody.generation_config as Record<string,unknown> | undefined;
+    if (error.category === "thinking_unsupported" && !thinkingRetried && config?.thinking_level !== undefined) {
+      // Only an explicit parameter rejection triggers this compatibility adjustment.
+      const { thinking_level: _thinking, ...rest } = config;
+      requestBody = { ...requestBody, generation_config: rest };
+      thinkingRetried = true;
+      console.warn(`gemini_thinking_compatibility_retry model=${model}`);
+      continue;
+    }
+
+    if (!transientRetryableStatus(res.status) || transientRetries >= Math.max(1, attempts) - 1) {
       throw error;
     }
 
-    const raw = await res.text();
-    console.log(`gemini_request_end model=${model} attempt=${attempt + 1} status=${res.status} elapsedMs=${Date.now() - started}`);
-    if (res.ok) {
-      const json = safeJson<InteractionResponse>(raw);
-      const text = outputText(json);
-      if (!text) throw new Error(`Gemini returned no text output (model=${model}, status=${json.status ?? "unknown"})`);
-      return text;
-    }
-
-    if (res.status === 429 || res.status === 524) throw new GeminiInteractionError(res.status, raw, model);
-
-    if (!transientRetryableStatus(res.status) || attempt === attempts - 1) {
-      throw new GeminiInteractionError(res.status, raw, model);
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, transientRetryDelayMs(attempt, res.headers.get("retry-after"))));
+    const delay = transientRetryDelayMs(transientRetries++, res.headers.get("retry-after"));
+    if (Date.now() + delay >= deadline) throw new UpstreamTimeoutError(`Gemini Interactions ${model}`, timeoutMs);
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
-  throw new Error("Gemini interaction exhausted retries unexpectedly");
+}
+
+async function interaction(env: Env, model: string, body: Record<string,unknown>, timeoutMs: number, attempts = TRANSIENT_ATTEMPTS): Promise<string> {
+  return outputText(await requestGeminiInteraction(env, model, body, timeoutMs, attempts));
+}
+
+// Content MIME enums: https://ai.google.dev/api/interactions-api
+const SUPPORTED_IMAGE_MIMES = new Set(["image/png","image/jpeg","image/webp","image/heic","image/heif","image/gif","image/bmp","image/tiff"]);
+const SUPPORTED_AUDIO_MIMES = new Set(["audio/wav","audio/mp3","audio/aiff","audio/aac","audio/ogg","audio/flac","audio/mpeg","audio/m4a","audio/l16","audio/opus","audio/alaw","audio/mulaw","audio/webm"]);
+const SUPPORTED_VIDEO_MIMES = new Set(["video/mp4","video/mpeg","video/mpg","video/mov","video/avi","video/x-flv","video/webm","video/wmv","video/3gpp"]);
+
+function normalizedMime(mime: string): string {
+  const value = mime.split(";",1)[0]!.trim().toLowerCase();
+  const aliases: Record<string,string> = { "image/jpg":"image/jpeg", "audio/x-wav":"audio/wav", "audio/x-m4a":"audio/m4a", "video/quicktime":"video/mov" };
+  return aliases[value] ?? value;
 }
 
 function mediaType(mime: string): "image"|"audio"|"video"|"document"|null {
-  if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("audio/")) return "audio";
-  if (mime.startsWith("video/")) return "video";
+  if (SUPPORTED_IMAGE_MIMES.has(mime)) return "image";
+  if (SUPPORTED_AUDIO_MIMES.has(mime)) return "audio";
+  if (SUPPORTED_VIDEO_MIMES.has(mime)) return "video";
   if (mime === "application/pdf") return "document";
   return null;
 }
@@ -206,12 +360,14 @@ async function deleteGeminiFile(env: Env, name: string): Promise<void> {
 export async function mediaInputs(env: Env, messages: MessageRow[], max: number): Promise<{inputs:GeminiInput[];cleanup:()=>Promise<void>}> {
   const inputs: GeminiInput[] = [];
   const uploaded: UploadedFile[] = [];
-  const media = messages.filter((m) => m.media_key && m.mime_type && !m.unsent).slice(-max);
+  const count = Number.isFinite(max) ? Math.max(0, Math.trunc(max)) : 0;
+  if (count === 0) return { inputs, cleanup: async () => {} };
+  const media = messages.filter((m) => m.media_key && m.mime_type && !m.unsent).slice(-count);
   for (const m of media) {
     const obj = await env.MEDIA.get(m.media_key!);
     if (!obj) continue;
     const buf = await obj.arrayBuffer();
-    const mime = m.mime_type!;
+    const mime = normalizedMime(m.mime_type!);
     inputs.push({ type:"text", text:`添付メディア: ${m.sender_name} が送信した ${m.type} (message_id=${m.line_message_id}, mime=${mime})` });
     if (mime === R2_LIMIT_MARKER_MIME) {
       inputs.push({type:"text", text:"この添付はCloudflare R2 Standardの無料ストレージ上限10 GBを超えないため、バイナリ本体を保存していません。内容そのものは参照できません。必要なら /usage で現在のR2保存量を確認してください。"});
@@ -225,7 +381,7 @@ export async function mediaInputs(env: Env, messages: MessageRow[], max: number)
     }
     const type = mediaType(mime);
     if (!type) {
-      inputs.push({type:"text", text:"このMIMEタイプはGeminiへバイナリ送信せず、ファイルの存在とメタデータのみ参照します。"});
+      inputs.push({type:"text", text:"この添付形式はGemini APIの対応外のため、ファイルの存在とメタデータのみ参照します。内容を見た・聞いたとは回答せず、必要なら対応形式での再送を依頼してください。"});
       continue;
     }
     if (buf.byteLength <= INLINE_MAX) inputs.push({ type, mime_type:mime, data:base64FromArrayBuffer(buf) });
@@ -300,15 +456,23 @@ export async function answer(env: Env, systemInstruction: string, prompt: string
         continue;
       }
       if (error instanceof GeminiInteractionError && (error.status === 408 || error.status === 524 || error.status >= 500)) {
+        if (error.category === "blocked") {
+          return { text: failureReply(error), model: null, exhaustedModels, newlyExhaustedModels, routeFailures, newRouteFailures, allModelsExhausted: false, terminalReason: "upstream" };
+        }
         console.warn(`gemini_model_upstream_failure model=${model} status=${error.status} elapsedMs=${Date.now() - started}`);
         routeFailures.push({ model, reason: error.status === 524 ? "timeout" : "upstream" });
         newRouteFailures.push({ model, reason: error.status === 524 ? "timeout" : "upstream" });
         continue;
       }
+      if (error instanceof GeminiInteractionError && (error.category === "model_unavailable" || error.category === "thinking_unsupported")) {
+        routeFailures.push({ model, reason: "upstream" });
+        newRouteFailures.push({ model, reason: "upstream" });
+        continue;
+      }
       if (error instanceof GeminiInteractionError) {
         return {
-          text: `Gemini APIへの接続でHTTP ${error.status}エラーが発生したため、回答を生成できませんでした。設定またはAPI状態の確認が必要です。`,
-          model,
+          text: failureReply(error),
+          model: null,
           exhaustedModels,
           newlyExhaustedModels,
           routeFailures,
@@ -316,11 +480,6 @@ export async function answer(env: Env, systemInstruction: string, prompt: string
           allModelsExhausted: false,
           terminalReason: "upstream",
         };
-      }
-      if (error instanceof Error && error.message.startsWith("Gemini returned no text output")) {
-        routeFailures.push({ model, reason: "upstream" });
-        newRouteFailures.push({ model, reason: "upstream" });
-        continue;
       }
       throw error;
     }
@@ -383,7 +542,11 @@ export async function extractMemory(env: Env, prompt: string): Promise<MemoryExt
       return null;
     }
     if (error instanceof UpstreamTimeoutError || (error instanceof GeminiInteractionError && (error.status === 408 || error.status === 524 || error.status >= 500))) {
-      console.warn(`memory model unavailable; postponing extraction model=${model}`, error);
+      console.warn(`memory model unavailable; postponing extraction model=${model}`);
+      return null;
+    }
+    if (error instanceof GeminiInteractionError) {
+      console.warn(`memory model rejected request; postponing extraction model=${model} category=${error.category} status=${error.status}`);
       return null;
     }
     throw error;

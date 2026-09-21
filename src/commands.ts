@@ -2,6 +2,7 @@ import type { Env, GroupRow, MemberRow, ThinkingLevel } from "./types.js";
 import { approveJoin, createJoinRequest, deactivateMemory, getBoundGroup, getGroup, listMembers, listMemories, rejectJoin, setPersona, setThinking, stats, upsertMemory } from "./db.js";
 import { formatDecimalBytes, r2HardLimitBytes, r2StorageUsage } from "./r2-guard.js";
 import { normalizeThinking } from "./util.js";
+import { readLastGeminiError } from "./gemini.js";
 
 export interface CommandContext {
   env: Env;
@@ -97,7 +98,9 @@ export async function runCommand(ctx: CommandContext, name: string, args: string
     case "status": {
       const m=requireMember(ctx); if(typeof m==="string") return {text:m};
       const s=await stats(env,groupId); const members=await listMembers(env,groupId); const group=await getGroup(env,groupId);
-      return {text:`Home AI 稼働中\nモデル: ${env.GEMINI_MODEL}\nThinking: ${group?.thinking_level ?? env.DEFAULT_THINKING_LEVEL}\n登録メンバー: ${members.length}/2\n保存メッセージ: ${s.messages}\n有効な長期記憶: ${s.memories}\n要約セグメント: ${s.summaries}`};
+      const lastError=await readLastGeminiError(env).catch(()=>null);
+      const diagnostic=lastError ? `\n\n直近のAPIエラー記録（現在の障害とは限りません）\nHTTP ${lastError.status} / ${lastError.category}\nモデル: ${lastError.model}\n記録時刻: ${new Date(lastError.time).toLocaleString("ja-JP",{timeZone:"Asia/Tokyo"})} JST` : "";
+      return {text:`Home AI 稼働中\nモデル: ${env.GEMINI_MODEL}\nThinking: ${group?.thinking_level ?? env.DEFAULT_THINKING_LEVEL}\n登録メンバー: ${members.length}/2\n保存メッセージ: ${s.messages}\n有効な長期記憶: ${s.memories}\n要約セグメント: ${s.summaries}${diagnostic}`};
     }
     case "usage": {
       const m=requireMember(ctx); if(typeof m==="string") return {text:m};

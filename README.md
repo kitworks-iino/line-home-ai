@@ -24,6 +24,7 @@ The repository is designed so that after Git deployment, the human setup is **UI
 - Runs memory maintenance as separate Queue jobs so it does not consume the LINE reply path's D1 query/latency budget.
 - Uses a dedicated memory model (`GEMINI_MEMORY_MODEL`) so long-term-memory extraction does not spend the primary conversation model's quota.
 - Uses `gemini-flash-latest` as the primary conversation alias, so Google's latest Flash release is adopted automatically when the alias is hot-swapped.
+- Uses conversation context to recognize outing/event questions, resolve dates in Japan time, and search Hamamatsu by default with Gemini 2.5 Search grounding and cited links. Search attempts are reserved in D1 before each call, with a 450-per-day application limit.
 - On HTTP 429, does **not** retry the same exhausted model. It moves through the configured `GEMINI_FALLBACK_MODELS` ladder. When fallback succeeds, LINE first sends a model-switch notice and then the original answer from the lower model.
 - Invalidates derived memory and summaries when the originating LINE message is unsent.
 - Provides explicit memory/persona/thinking/admin/data-deletion commands.
@@ -54,6 +55,8 @@ Design details: **[Architecture](docs/ARCHITECTURE.md)**
 
 R2 billing/free-tier behavior: **[R2 Free Tier](docs/R2_FREE_TIER.md)**
 
+Google AI Pro benefits, API billing requirements, event search and HTTP 400 handling: **[Google AI and Search / 日本語](docs/GOOGLE_AI_AND_SEARCH.md)**
+
 ## Required Cloudflare secrets
 
 `LINE_CHANNEL_ID`, `LINE_CHANNEL_SECRET`, `GEMINI_API_KEY`, `SETUP_CODE`
@@ -61,6 +64,8 @@ R2 billing/free-tier behavior: **[R2 Free Tier](docs/R2_FREE_TIER.md)**
 ## Health endpoint
 
 `GET /health` — returns `ready:true` only when all four required secrets are present and includes the configured model route, isolated Queue state, latency bounds and implicit follow-up configuration.
+
+`upstreamCheck` reports a once-per-release smoke check using fixed, non-personal prompts. The first health request queues this check; repeated requests and duplicate queue deliveries cannot repeat it. It checks Gemini generation and a public Hamamatsu event search without sending anything to LINE. `ready` describes configuration/database readiness; `upstreamCheck.state` separately records actual upstream success or a safe error category.
 
 ## Webhook endpoint
 

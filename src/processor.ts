@@ -26,6 +26,8 @@ import {
 import { runCommand } from "./commands.js";
 import { conversationPrompt, memoryExtractionPrompt, systemInstruction } from "./context.js";
 import { answer, extractMemory, mediaInputs } from "./gemini.js";
+import { eventAnswer } from "./events.js";
+import { runReleaseCheck } from "./diagnostics.js";
 import { DEFAULT_IMPLICIT_FOLLOWUP_WINDOW_MS, isImplicitAssistantFollowup, mentionsAnotherUser } from "./invocation.js";
 import { allModelsExhaustedNotice, allModelsUnavailableNotice, fallbackNotice } from "./model-routing.js";
 import { getGroupMemberProfile, getMessageContent, lineTextParts, sendBestEffortTexts } from "./line.js";
@@ -452,9 +454,14 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
       const prompt = cleaned && cleaned !== event.message.type
         ? `${promptBase}\n\n【現在の依頼本文】\n${cleaned}`
         : promptBase;
-      const maxMedia = asInt(env.MAX_MEDIA_CONTEXT, 3, 0, 8);
-      const media = await mediaInputs(env, recent, maxMedia);
-      try {
+      const eventResponseText = await eventAnswer(env, prompt, saved.created_at);
+      if (eventResponseText !== null) {
+        await cacheEventResponse(env, key, capLineResponse(eventResponseText));
+        console.log(`line_event_search_cached key=${key} elapsedMs=${Date.now() - started}`);
+      } else {
+        const maxMedia = asInt(env.MAX_MEDIA_CONTEXT, 3, 0, 8);
+        const media = await mediaInputs(env, recent, maxMedia);
+        try {
         const thinking: ThinkingLevel = deepPrompt ? "high" : group.thinking_level;
         console.log(`line_ai_start key=${key} thinking=${thinking} elapsedMs=${Date.now() - started}`);
         const generated = await answer(env, systemInstruction(group, members), prompt, media.inputs, thinking);
@@ -471,8 +478,9 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
         }
         await cacheEventResponse(env, key, response);
         console.log(`line_ai_cached key=${key} model=${generated.model ?? "none"} elapsedMs=${Date.now() - started}`);
-      } finally {
-        await media.cleanup();
+        } finally {
+          await media.cleanup();
+        }
       }
       state = await eventResponse(env, key);
     }
@@ -491,6 +499,10 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
 
 export async function processQueuePayload(env: Env, payload: QueuePayload): Promise<void> {
   await ensureSchema(env);
+  if (payload.kind === "diagnostic") {
+    await runReleaseCheck(env, payload.release);
+    return;
+  }
   if (payload.kind === "memory") {
     await maintainMemory(env, payload.groupId);
     return;

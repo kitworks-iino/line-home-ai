@@ -5,6 +5,7 @@ import { modelRoute } from "./model-routing.js";
 import { processQueuePayload } from "./processor.js";
 import { boundedMs } from "./timeout.js";
 import { constantTimeEqual } from "./util.js";
+import { RELEASE, releaseCheck } from "./diagnostics.js";
 
 async function verifyLineSignature(rawBody:string,signature:string,secret:string):Promise<boolean>{
   const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
@@ -45,13 +46,16 @@ export default {
       }
       const configured = Object.values(required).every(Boolean);
       const routing = modelRoute(env);
+      const upstreamCheck = database && configured ? await releaseCheck(env).catch(()=>({state:"unavailable"})) : null;
       return Response.json({
         ok: database,
         ready: database && configured,
         service:"line-home-ai",
         model:routing.primary,
         modelRouting:routing,
-        version:"1.2.1",
+        version:RELEASE,
+        upstreamCheck,
+        events:{contextualIntent:true,defaultLocation:"静岡県浜松市",timeZone:"Asia/Tokyo",searchModels:["gemini-2.5-flash","gemini-2.5-flash-lite"],dailySearchCap:450},
         database,
         queues:{reply:"line-home-ai-events",memory:"line-home-ai-memory",isolated:true},
         latency:{

@@ -4,7 +4,7 @@ export interface Env {
   DB: D1Database;
   MEDIA: R2Bucket;
   EVENT_QUEUE: Queue<LineQueuePayload>;
-  MEMORY_QUEUE: Queue<MemoryQueuePayload>;
+  MEMORY_QUEUE: Queue<MemoryQueuePayload | DiagnosticQueuePayload>;
   LINE_CHANNEL_ID: string;
   LINE_CHANNEL_SECRET: string;
   GEMINI_API_KEY: string;
@@ -39,7 +39,8 @@ export interface MemoryQueuePayload {
   requestedAt: number;
 }
 
-export type QueuePayload = LineQueuePayload | MemoryQueuePayload;
+export interface DiagnosticQueuePayload { kind: "diagnostic"; release: string }
+export type QueuePayload = LineQueuePayload | MemoryQueuePayload | DiagnosticQueuePayload;
 
 export interface LineWebhookBody {
   destination: string;
