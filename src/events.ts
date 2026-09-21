@@ -3,6 +3,7 @@ import { GeminiInteractionError, outputText, requestGeminiInteraction } from "./
 import { conversationModels, loadModelQuotaBlocks, quotaBlockFrom429, saveModelQuotaBlock } from "./model-routing.js";
 import { UpstreamTimeoutError } from "./timeout.js";
 import { safeJson } from "./util.js";
+import { geminiApiKey } from "./gemini-key.js";
 
 const INTENT_MODEL = "gemini-3.5-flash-lite";
 // Only these 2.5 models have the shared free Search grounding allowance.
@@ -201,7 +202,7 @@ async function searchRequest(env: Env, model: string, prompt: string, timeoutMs:
       (async () => {
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
           method: "POST",
-          headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+          headers: { "content-type": "application/json", "x-goog-api-key": geminiApiKey(env) },
           body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], tools: [{ google_search: {} }] }),
           signal: controller.signal,
         });

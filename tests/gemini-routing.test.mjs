@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { answer, extractMemory, readLastGeminiError, requestGeminiInteraction } from '../.test-dist/gemini.js';
+import { answer, extractMemory, GeminiInteractionError, readLastGeminiError, requestGeminiInteraction } from '../.test-dist/gemini.js';
+import { geminiApiKey, geminiKeyFormat } from '../.test-dist/gemini-key.js';
 import { UpstreamTimeoutError } from '../.test-dist/timeout.js';
 
 const okInteraction=(text)=>new Response(JSON.stringify({
@@ -11,6 +12,20 @@ const okInteraction=(text)=>new Response(JSON.stringify({
 const quotaResponse=()=>new Response(JSON.stringify({
   error:{code:429,status:'RESOURCE_EXHAUSTED',message:'quota exceeded'},
 }),{status:429,headers:{'content-type':'application/json'}});
+
+test('production array-wrapped API_KEY_INVALID is classified as authentication without exposing its payload',()=>{
+  const error=new GeminiInteractionError(400,JSON.stringify([{error:{code:400,message:'API key not valid. Please pass a valid API key.',status:'INVALID_ARGUMENT',details:[{reason:'API_KEY_INVALID'}]}}]),'gemini-flash-latest');
+  assert.equal(error.category,'authentication');
+  assert.ok(!error.message.includes('Please pass'));
+});
+
+test('copied key wrappers are normalized without modifying a correctly formatted key',()=>{
+  const key='AIza'+'a'.repeat(35);
+  assert.equal(geminiApiKey({GEMINI_API_KEY:'  "'+key+'"\n'}),key);
+  assert.equal(geminiApiKey({GEMINI_API_KEY:key}),key);
+  assert.deepEqual(geminiKeyFormat({GEMINI_API_KEY:key}),{normalized:false,looksLikeGoogleApiKey:true});
+  assert.deepEqual(geminiKeyFormat({GEMINI_API_KEY:'placeholder'}),{normalized:false,looksLikeGoogleApiKey:false});
+});
 
 function dbWithBlock(model,blockedUntil=Date.now()+60_000){
   return {

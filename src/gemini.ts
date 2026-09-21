@@ -8,6 +8,7 @@ import {
 } from "./model-routing.js";
 import { boundedMs, fetchWithTimeout, UpstreamTimeoutError } from "./timeout.js";
 import { base64FromArrayBuffer, safeJson } from "./util.js";
+import { geminiApiKey } from "./gemini-key.js";
 
 const INTERACTIONS = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const INLINE_MAX = 8 * 1024 * 1024;
@@ -30,7 +31,8 @@ type GeminiErrorCategory = "authentication" | "permission" | "billing" | "region
 
 function apiErrorDetails(raw: string): { code: string; message: string; fields: string[] } {
   try {
-    const json = JSON.parse(raw) as {
+    const parsed = JSON.parse(raw);
+    const json = (Array.isArray(parsed) ? parsed.find((item)=>item?.error || item?.message) ?? {} : parsed) as {
       status?: string; code?: string | number; message?: string; detail?: string;
       error?: { status?: string; code?: string | number; message?: string; details?: Array<{ reason?: string; fieldViolations?: Array<{ field?: string }> }> };
       errors?: Array<{ code?: string; message?: string }>;
@@ -193,7 +195,7 @@ export async function requestGeminiInteraction(
       response = await Promise.race([
         fetch(INTERACTIONS, {
           method: "POST",
-          headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+          headers: { "content-type": "application/json", "x-goog-api-key": geminiApiKey(env) },
           body: JSON.stringify({ ...requestBody, model, store: false }),
           signal: controller.signal,
         }).then(async (res) => ({ res, raw: await res.text() })),
@@ -298,7 +300,7 @@ async function uploadGeminiFile(env: Env, buffer: ArrayBuffer, mimeType: string,
   const start = await fetchWithTimeout("https://generativelanguage.googleapis.com/upload/v1beta/files", {
     method: "POST",
     headers: {
-      "x-goog-api-key": env.GEMINI_API_KEY,
+      "x-goog-api-key": geminiApiKey(env),
       "x-goog-upload-protocol": "resumable",
       "x-goog-upload-command": "start",
       "x-goog-upload-header-content-length": String(buffer.byteLength),
@@ -334,7 +336,7 @@ async function waitForGeminiFileReady(env: Env, name: string): Promise<void> {
     const remaining = Math.max(1_000, deadline - Date.now());
     const res = await fetchWithTimeout(
       `https://generativelanguage.googleapis.com/v1beta/${name}`,
-      { headers: { "x-goog-api-key": env.GEMINI_API_KEY } },
+      { headers: { "x-goog-api-key": geminiApiKey(env) } },
       Math.min(10_000, remaining),
       "Gemini file status",
     );
@@ -352,7 +354,7 @@ async function waitForGeminiFileReady(env: Env, name: string): Promise<void> {
 async function deleteGeminiFile(env: Env, name: string): Promise<void> {
   await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1beta/${name}`,
-    { method: "DELETE", headers: { "x-goog-api-key": env.GEMINI_API_KEY } },
+    { method: "DELETE", headers: { "x-goog-api-key": geminiApiKey(env) } },
     10_000,
     "Gemini file delete",
   );

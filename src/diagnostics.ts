@@ -2,11 +2,12 @@ import type { Env } from "./types.js";
 import { GeminiInteractionError, outputText, requestGeminiInteraction } from "./gemini.js";
 import { eventAnswer } from "./events.js";
 import { conversationModels } from "./model-routing.js";
+import { geminiKeyFormat } from "./gemini-key.js";
 
 // One fixed, non-personal smoke test per release. No LINE messages are sent.
-export const RELEASE = "1.3.2";
+export const RELEASE = "1.3.3";
 const KEY = `release_check:${RELEASE}`;
-type Check = { state: string; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string };
+type Check = { state: string; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
 
 // Only called for the fixed arithmetic probe: never expose errors for household prompts.
 function fixedProbeMessage(error: GeminiInteractionError, key: string): string {
@@ -37,7 +38,7 @@ export async function runReleaseCheck(env: Env, release: string): Promise<void> 
   const claim = await env.DB.prepare("UPDATE app_state SET value=?,updated_at=? WHERE key=? AND value=? RETURNING key")
     .bind(JSON.stringify({state:"running"}),Date.now(),KEY,JSON.stringify({state:"queued"})).first<{key:string}>();
   if (!claim) return;
-  let result: Check = {state:"failed",checkedAt:Date.now()};
+  let result: Check = {state:"failed",checkedAt:Date.now(),keyFormat:geminiKeyFormat(env)};
   try {
     const response = await requestGeminiInteraction(env,conversationModels(env)[0]!,{
       input:"接続テストです。2+2の答えを数字だけで返してください。",
