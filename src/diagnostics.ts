@@ -4,9 +4,18 @@ import { eventAnswer } from "./events.js";
 import { conversationModels } from "./model-routing.js";
 
 // One fixed, non-personal smoke test per release. No LINE messages are sent.
-export const RELEASE = "1.3.0";
+export const RELEASE = "1.3.1";
 const KEY = `release_check:${RELEASE}`;
-type Check = { state: string; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string };
+type Check = { state: string; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string };
+
+// Only called for the fixed arithmetic probe: never expose errors for household prompts.
+function fixedProbeMessage(error: GeminiInteractionError, key: string): string {
+  let message: string;
+  try { const body=JSON.parse(error.raw); message=JSON.stringify(body.error ?? {status:error.status}); }
+  catch { return "non_json_error"; }
+  if (key) message=message.split(key).join("[REDACTED]");
+  return message.replace(/AIza[\w-]+/g,"[REDACTED]").replace(/https?:\/\/[^\s"<>]+/g,"[URL]").replace(/\b\d{8,}\b/g,"[ID]").slice(0,1500);
+}
 
 export async function releaseCheck(env: Env): Promise<Check | null> {
   const existing = await env.DB.prepare("SELECT value FROM app_state WHERE key=?").bind(KEY).first<{value:string}>();
@@ -42,7 +51,10 @@ export async function runReleaseCheck(env: Env, release: string): Promise<void> 
     result.state = result.search === "ok" ? "passed" : "partial";
   } catch (error) {
     result.category = error instanceof GeminiInteractionError ? error.category : "probe_failed";
-    if (error instanceof GeminiInteractionError) result.status = error.status;
+    if (error instanceof GeminiInteractionError) {
+      result.status = error.status;
+      if (!result.conversation) result.apiMessage=fixedProbeMessage(error,env.GEMINI_API_KEY);
+    }
   }
   result.checkedAt=Date.now();
   await env.DB.prepare("UPDATE app_state SET value=?,updated_at=? WHERE key=?").bind(JSON.stringify(result),Date.now(),KEY).run();
