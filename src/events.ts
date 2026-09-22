@@ -250,7 +250,7 @@ export async function eventAnswer(env: Env, prompt: string, now = Date.now()): P
   return searchEventIntent(env, intent, deadline);
 }
 
-export async function searchEventIntent(env: Env, intent: EventIntent, deadline = Date.now() + 45_000): Promise<string> {
+export async function searchEventIntent(env: Env, intent: EventIntent, deadline = Date.now() + 45_000, observe?: (model: string, status: number, raw: string) => void): Promise<string> {
   const blocks = await loadModelQuotaBlocks(env, [...SEARCH_MODELS]).catch(() => new Map());
   for (const model of SEARCH_MODELS) {
     if (blocks.has(model)) continue;
@@ -260,6 +260,7 @@ export async function searchEventIntent(env: Env, intent: EventIntent, deadline 
     try {
       const res = await searchRequest(env, model, publicSearchPrompt(intent), Math.min(25_000, remaining));
       const raw = res.raw;
+      observe?.(model, res.status, raw);
       if (!res.ok) {
         console.warn(`event_search_http model=${model} status=${res.status}`);
         if (res.status === 429) await saveModelQuotaBlock(env, model, quotaBlockFrom429(raw)).catch(() => undefined);

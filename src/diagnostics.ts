@@ -5,9 +5,9 @@ import { conversationModels } from "./model-routing.js";
 import { geminiKeyFormat } from "./gemini-key.js";
 
 // One fixed, non-personal smoke test per release. No LINE messages are sent.
-export const RELEASE = "1.4.0";
+export const RELEASE = "1.4.1";
 const KEY = `release_check:${RELEASE}`;
-type Check = { state: string; conversationMs?: number; searchMs?: number; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
+type Check = { state: string; searchDiagnostics?: Array<{model:string;status:number;response:string}>; conversationMs?: number; searchMs?: number; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
 
 // Only called for the fixed arithmetic probe: never expose errors for household prompts.
 function fixedProbeMessage(error: GeminiInteractionError, key: string): string {
@@ -52,7 +52,12 @@ export async function runReleaseCheck(env: Env, release: string): Promise<void> 
     if (parsed.search !== false || parsed.answer?.trim() !== "4") throw new Error("unexpected smoke output");
     result.conversation="ok";
     phase = Date.now();
-    const generated = await routedAnswer(env,"日本語で答えてください。","【現在の依頼本文】明日の浜松市のイベントを検索して、開催日と出典リンクを教えてください。",[],"low",Date.now());
+    result.searchDiagnostics = [];
+    const generated = await routedAnswer(env,"日本語で答えてください。","【現在の依頼本文】明日の浜松市のイベントを検索して、開催日と出典リンクを教えてください。",[],"low",Date.now(), (model,status,raw) => {
+      // Only the fixed public Hamamatsu probe uses this observer; never household requests.
+      const response = raw.split(env.GEMINI_API_KEY).join("[REDACTED]").replace(/AIza[\w-]+/g,"[REDACTED]").slice(0,12000);
+      result.searchDiagnostics!.push({model,status,response});
+    });
     const search = generated.text;
     result.searchMs = Date.now() - phase;
     result.search = search?.includes("参照リンク") && /https?:\/\//.test(search) ? "ok" : "unavailable";
