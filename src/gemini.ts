@@ -252,7 +252,7 @@ export async function requestGeminiInteraction(
 
     const error = new GeminiInteractionError(res.status, raw, model);
     await logApiFailure(env, error);
-    if (!priorityRetried && requestBody.service_tier === "priority" && res.status === 400 && /service[_ .-]?tier|priority/i.test(error.raw) && /unsupported|not supported|unknown|invalid/i.test(error.raw)) {
+    if (!priorityRetried && requestBody.service_tier === "priority" && error.category === "invalid_request" && res.status === 400 && /service[_ .-]?tier|priority/i.test(error.raw) && /unsupported|not supported|unknown|invalid/i.test(error.raw)) {
       const { service_tier: _tier, ...standardBody } = requestBody;
       requestBody = standardBody;
       priorityRetried = true;

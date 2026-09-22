@@ -232,7 +232,7 @@ async function maintainMemory(env: Env, groupId: string): Promise<void> {
   const members = await listMembers(env, groupId);
   await Promise.all(members.map(async member => {
     const name = await getGroupMemberProfile(env,groupId,member.user_id);
-    if (name !== member.display_name) { await updateMemberName(env,groupId,member.user_id,name); member.display_name=name; }
+    if (name !== `LINE user ${member.user_id.slice(-6)}` && name !== member.display_name) { await updateMemberName(env,groupId,member.user_id,name); member.display_name=name; }
   }));
   const existing = await listMemories(env, groupId, "", 120);
   const extracted = await extractMemory(env, memoryExtractionPrompt(messages, existing, members));
