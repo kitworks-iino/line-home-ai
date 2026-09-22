@@ -3,6 +3,8 @@ import { canStoreWithinR2Limit, r2HardLimitBytes, r2StorageUsage } from "./r2-gu
 import { boundedMs, fetchWithTimeout } from "./timeout.js";
 import { splitLineText } from "./util.js";
 
+const profileCache = new Map<string, { name: string; expiresAt: number }>();
+
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
 function lineApiTimeoutMs(env: Env): number {
@@ -41,11 +43,17 @@ async function lineFetch(env: Env, url: string, init: RequestInit = {}): Promise
 }
 
 export async function getGroupMemberProfile(env: Env, groupId: string, userId: string): Promise<string> {
+  const cacheKey = `${env.LINE_CHANNEL_ID}:${groupId}:${userId}`;
+  const cached = profileCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.name;
   try {
     const res = await lineFetch(env, `https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(userId)}`);
     if (!res.ok) return `LINE user ${userId.slice(-6)}`;
     const j = await res.json() as { displayName?: string };
-    return j.displayName?.trim() || `LINE user ${userId.slice(-6)}`;
+    const name = j.displayName?.trim() || `LINE user ${userId.slice(-6)}`;
+    if (profileCache.size >= 100) profileCache.delete(profileCache.keys().next().value!);
+    profileCache.set(cacheKey, { name, expiresAt: Date.now() + 600_000 });
+    return name;
   } catch (error) {
     console.warn("LINE profile lookup failed; continuing with fallback display name", error);
     return `LINE user ${userId.slice(-6)}`;

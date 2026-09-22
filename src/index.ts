@@ -47,6 +47,9 @@ export default {
       const configured = Object.values(required).every(Boolean);
       const routing = modelRoute(env);
       const upstreamCheck = database && configured ? await releaseCheck(env).catch(()=>({state:"unavailable"})) : null;
+      const latencyRow = database ? await env.DB.prepare("SELECT value FROM app_state WHERE key='last_reply_latency'").first<{value:string}>().catch(()=>null) : null;
+      let lastReplyLatency: unknown = null;
+      try { if (latencyRow) lastReplyLatency = JSON.parse(latencyRow.value); } catch { /* no saved sample */ }
       return Response.json({
         ok: database,
         ready: database && configured,
@@ -54,6 +57,7 @@ export default {
         model:routing.primary,
         modelRouting:routing,
         version:RELEASE,
+        lastReplyLatency,
         upstreamCheck,
         events:{contextualIntent:true,defaultLocation:"静岡県浜松市",timeZone:"Asia/Tokyo",searchModels:["gemini-2.5-flash","gemini-2.5-flash-lite"],dailySearchCap:450},
         database,

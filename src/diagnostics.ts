@@ -1,13 +1,13 @@
 import type { Env } from "./types.js";
 import { GeminiInteractionError, outputText, requestGeminiInteraction } from "./gemini.js";
-import { eventAnswer } from "./events.js";
+import { routedAnswer, routedInstruction, ROUTED_FORMAT } from "./routed-answer.js";
 import { conversationModels } from "./model-routing.js";
 import { geminiKeyFormat } from "./gemini-key.js";
 
 // One fixed, non-personal smoke test per release. No LINE messages are sent.
-export const RELEASE = "1.3.3";
+export const RELEASE = "1.4.0";
 const KEY = `release_check:${RELEASE}`;
-type Check = { state: string; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
+type Check = { state: string; conversationMs?: number; searchMs?: number; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
 
 // Only called for the fixed arithmetic probe: never expose errors for household prompts.
 function fixedProbeMessage(error: GeminiInteractionError, key: string): string {
@@ -40,13 +40,21 @@ export async function runReleaseCheck(env: Env, release: string): Promise<void> 
   if (!claim) return;
   let result: Check = {state:"failed",checkedAt:Date.now(),keyFormat:geminiKeyFormat(env)};
   try {
+    let phase = Date.now();
     const response = await requestGeminiInteraction(env,conversationModels(env)[0]!,{
+      system_instruction:routedInstruction("あなたは日本語で短く答えるアシスタントです。", Date.now()),
       input:"接続テストです。2+2の答えを数字だけで返してください。",
-      generation_config:{thinking_level:"medium"},
+      response_format:ROUTED_FORMAT,
+      generation_config:{thinking_level:"low"},
     },20_000,1);
-    if (!outputText(response).includes("4")) throw new Error("unexpected smoke output");
+    result.conversationMs = Date.now() - phase;
+    const parsed = JSON.parse(outputText(response)) as {search?:boolean;answer?:string};
+    if (parsed.search !== false || parsed.answer?.trim() !== "4") throw new Error("unexpected smoke output");
     result.conversation="ok";
-    const search = await eventAnswer(env,"【現在の依頼本文】明日の浜松市のイベントを検索して、開催日と出典リンクを教えてください。",Date.now());
+    phase = Date.now();
+    const generated = await routedAnswer(env,"日本語で答えてください。","【現在の依頼本文】明日の浜松市のイベントを検索して、開催日と出典リンクを教えてください。",[],"low",Date.now());
+    const search = generated.text;
+    result.searchMs = Date.now() - phase;
     result.search = search?.includes("参照リンク") && /https?:\/\//.test(search) ? "ok" : "unavailable";
     result.searchPreview = (search ?? "分類結果なし").slice(0,6000);
     result.state = result.search === "ok" ? "passed" : "partial";

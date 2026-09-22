@@ -32,7 +32,7 @@ interface GroundingResponse {
   }>;
 }
 
-const INTENT_SCHEMA = {
+export const INTENT_SCHEMA = {
   type: "object",
   properties: {
     search: { type: "boolean" },
@@ -247,6 +247,10 @@ export async function eventAnswer(env: Env, prompt: string, now = Date.now()): P
   }
   if (!intent) return null;
 
+  return searchEventIntent(env, intent, deadline);
+}
+
+export async function searchEventIntent(env: Env, intent: EventIntent, deadline = Date.now() + 45_000): Promise<string> {
   const blocks = await loadModelQuotaBlocks(env, [...SEARCH_MODELS]).catch(() => new Map());
   for (const model of SEARCH_MODELS) {
     if (blocks.has(model)) continue;

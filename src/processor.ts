@@ -25,8 +25,8 @@ import {
 } from "./db.js";
 import { runCommand } from "./commands.js";
 import { conversationPrompt, memoryExtractionPrompt, systemInstruction } from "./context.js";
-import { answer, extractMemory, mediaInputs } from "./gemini.js";
-import { eventAnswer } from "./events.js";
+import { extractMemory, mediaInputs } from "./gemini.js";
+import { routedAnswer, isSimpleGreeting } from "./routed-answer.js";
 import { runReleaseCheck } from "./diagnostics.js";
 import { DEFAULT_IMPLICIT_FOLLOWUP_WINDOW_MS, isImplicitAssistantFollowup, mentionsAnotherUser } from "./invocation.js";
 import { allModelsExhaustedNotice, allModelsUnavailableNotice, fallbackNotice } from "./model-routing.js";
@@ -363,6 +363,9 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
   const groupId = groupIdOf(payload);
   const key = eventId(payload);
   const started = Date.now();
+  const timings: Record<string, number> = { queueMs: Math.max(0, started - payload.receivedAt) };
+  let phase = started;
+  let cleanupMedia: (() => Promise<void>) | undefined;
   console.log(`line_event_start key=${key} webhookAgeMs=${Date.now() - payload.receivedAt}`);
   const claimed = await claimEvent(env, key, groupId, event.type);
   if (claimed === "done") return;
@@ -446,47 +449,51 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
       const recentResult = await env.DB.prepare("SELECT * FROM messages WHERE group_id=? AND unsent=0 ORDER BY created_at DESC,line_message_id DESC LIMIT ?")
         .bind(groupId, recentLimit).all<MessageRow>();
       const recent = (recentResult.results ?? []).reverse();
-      const summaries = await listSummaries(env, groupId, 8);
-      const memories = await listMemories(env, groupId, "", 80);
-      const members = await listMembers(env, groupId);
+      const [summaries, memories, members] = await Promise.all([
+        listSummaries(env, groupId, 8), listMemories(env, groupId, "", 80), listMembers(env, groupId),
+      ]);
       const promptBase = conversationPrompt(recent, summaries, memories, saved.line_message_id);
       const cleaned = deepPrompt ?? (textMessage(event.message) ? stripNaturalInvocation(event.message.text) : "");
       const prompt = cleaned && cleaned !== event.message.type
         ? `${promptBase}\n\n【現在の依頼本文】\n${cleaned}`
         : promptBase;
-      const eventResponseText = await eventAnswer(env, prompt, saved.created_at);
-      if (eventResponseText !== null) {
-        await cacheEventResponse(env, key, capLineResponse(eventResponseText));
-        console.log(`line_event_search_cached key=${key} elapsedMs=${Date.now() - started}`);
+      const simpleGreeting = !deepPrompt && !quoted && isSimpleGreeting(cleaned);
+      const maxMedia = simpleGreeting ? 0 : asInt(env.MAX_MEDIA_CONTEXT, 3, 0, 8);
+      timings.contextMs = Date.now() - phase;
+      phase = Date.now();
+      const media = await mediaInputs(env, recent, maxMedia);
+      timings.mediaMs = Date.now() - phase;
+      phase = Date.now();
+      cleanupMedia = media.cleanup;
+      const thinking: ThinkingLevel = deepPrompt ? "high" : simpleGreeting ? "low" : group.thinking_level;
+      console.log(`line_ai_start key=${key} thinking=${thinking} elapsedMs=${Date.now() - started}`);
+      const generated = await routedAnswer(env, systemInstruction(group, members), prompt, media.inputs, thinking, saved.created_at);
+      timings.generationMs = Date.now() - phase;
+      let response: string;
+      if (generated.allModelsExhausted) {
+        response = allModelsExhaustedNotice(generated.exhaustedModels);
+      } else if (!generated.model) {
+        response = allModelsUnavailableNotice(generated.routeFailures, generated.text || "Gemini APIから時間内に回答を取得できませんでした。もう一度呼びかけてください。");
       } else {
-        const maxMedia = asInt(env.MAX_MEDIA_CONTEXT, 3, 0, 8);
-        const media = await mediaInputs(env, recent, maxMedia);
-        try {
-        const thinking: ThinkingLevel = deepPrompt ? "high" : group.thinking_level;
-        console.log(`line_ai_start key=${key} thinking=${thinking} elapsedMs=${Date.now() - started}`);
-        const generated = await answer(env, systemInstruction(group, members), prompt, media.inputs, thinking);
-        let response: string;
-        if (generated.allModelsExhausted) {
-          response = allModelsExhaustedNotice(generated.exhaustedModels);
-        } else if (!generated.model) {
-          response = allModelsUnavailableNotice(generated.routeFailures, generated.text || "Gemini APIから時間内に回答を取得できませんでした。もう一度呼びかけてください。");
-        } else {
-          const notice = fallbackNotice(generated.routeFailures, generated.model);
-          response = notice
-            ? encodeDeliveryMessages([notice, generated.text])
-            : capLineResponse(generated.text);
-        }
-        await cacheEventResponse(env, key, response);
-        console.log(`line_ai_cached key=${key} model=${generated.model ?? "none"} elapsedMs=${Date.now() - started}`);
-        } finally {
-          await media.cleanup();
-        }
+        const notice = fallbackNotice(generated.routeFailures, generated.model);
+        response = notice
+          ? encodeDeliveryMessages([notice, generated.text])
+          : capLineResponse(generated.text);
       }
+      await cacheEventResponse(env, key, response);
+      console.log(`line_ai_cached key=${key} model=${generated.model ?? "none"} elapsedMs=${Date.now() - started}`);
       state = await eventResponse(env, key);
     }
 
     if (!state?.response_text) throw new Error("AI response was not cached");
+    phase = Date.now();
     await deliver(env, key, groupId, event.replyToken, event.timestamp, state.response_text, true);
+    timings.deliveryMs = Date.now() - phase;
+    timings.processingMs = Date.now() - started;
+    timings.totalMs = Date.now() - payload.receivedAt;
+    console.log(`line_latency ${JSON.stringify(timings)}`);
+    await env.DB.prepare("INSERT INTO app_state(key,value,updated_at) VALUES('last_reply_latency',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
+      .bind(JSON.stringify({ ...timings, checkedAt: Date.now() }), Date.now()).run().catch(() => undefined);
     console.log(`line_delivery_complete key=${key} elapsedMs=${Date.now() - started}`);
     await enqueueMemoryMaintenance(env, groupId);
     await completeEvent(env, key);
@@ -494,6 +501,8 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
     console.error(`line_event_failed key=${key} elapsedMs=${Date.now() - started}`, error);
     await failEvent(env, key).catch(() => undefined);
     throw error;
+  } finally {
+    await cleanupMedia?.().catch(() => undefined);
   }
 }
 

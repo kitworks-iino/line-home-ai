@@ -397,7 +397,7 @@ export async function mediaInputs(env: Env, messages: MessageRow[], max: number)
   return { inputs, cleanup: async () => { await Promise.all(uploaded.map((f) => deleteGeminiFile(env,f.name).catch(()=>undefined))); } };
 }
 
-export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel): Promise<AnswerResult> {
+export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel, responseFormat?: Record<string, unknown>): Promise<AnswerResult> {
   const models = conversationModels(env);
   const exhaustedModels: string[] = [];
   const newlyExhaustedModels: string[] = [];
@@ -437,6 +437,7 @@ export async function answer(env: Env, systemInstruction: string, prompt: string
         system_instruction: systemInstruction,
         input: [{type:"text",text:prompt}, ...media],
         generation_config: { thinking_level: thinking },
+        ...(responseFormat ? { response_format: responseFormat } : {}),
       }, Math.min(modelTimeoutMs(env), remaining));
       console.log(`gemini_answer_success model=${model} totalElapsedMs=${Date.now() - started}`);
       return { text, model, exhaustedModels, newlyExhaustedModels, routeFailures, newRouteFailures, allModelsExhausted: false, terminalReason: null };
