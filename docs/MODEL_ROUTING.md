@@ -36,8 +36,8 @@ Quota exhaustion is not the only reason a model can become unusable for one requ
 Default latency configuration:
 
 ```text
-GEMINI_MODEL_TIMEOUT_MS=45000
-GEMINI_REPLY_DEADLINE_MS=90000
+GEMINI_MODEL_TIMEOUT_MS=30000
+GEMINI_REPLY_DEADLINE_MS=60000
 GEMINI_DEEP_DEADLINE_MS=180000
 GEMINI_MEMORY_TIMEOUT_MS=45000
 LINE_API_TIMEOUT_MS=10000
@@ -45,12 +45,12 @@ LINE_API_TIMEOUT_MS=10000
 
 Behavior:
 
-- A conversation model gets at most 45 seconds for one attempt.
-- Normal conversation gets at most 90 seconds total across the routing chain.
+- A conversation model gets at most 30 seconds; exact standalone greetings use 20 seconds per model and 35 seconds total.
+- Normal processing reserves 20 seconds of its 60-second budget for delivery; generation and event search share the remaining absolute deadline. This is an application budget, not an external delivery guarantee.
 - `/deep` gets at most 180 seconds total.
 - HTTP 524 is treated as timeout-like failure.
 - A timeout or transient upstream 5xx is **not persisted as quota exhaustion**. The next configured model can be tried while overall time remains.
-- Fast transient 408/5xx responses get only a bounded short retry; they cannot hold the Queue indefinitely.
+- Conversation routing uses one transient attempt per model. Explicit unsupported Priority falls back to standard on the same model within the original deadline.
 
 If a lower model answers successfully, LINE sends the result in this order:
 
@@ -73,11 +73,24 @@ If the memory model returns 429, the persistent per-model quota block is used an
 GEMINI_MODEL=gemini-flash-latest
 GEMINI_FALLBACK_MODELS=gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite
 GEMINI_MEMORY_MODEL=gemini-3.5-flash-lite
-GEMINI_MODEL_TIMEOUT_MS=45000
-GEMINI_REPLY_DEADLINE_MS=90000
+GEMINI_MODEL_TIMEOUT_MS=30000
+GEMINI_REPLY_DEADLINE_MS=60000
 GEMINI_DEEP_DEADLINE_MS=180000
 GEMINI_MEMORY_TIMEOUT_MS=45000
 LINE_API_TIMEOUT_MS=10000
 ```
 
 These are non-secret configuration variables. The API key remains only in the `GEMINI_API_KEY` Cloudflare Secret.
+
+## Release 1.6.0
+
+- Latest Flash remains primary. Conversation calls request Priority. Actual returned tier is logged separately; Google may downgrade to standard. No paid billing is enabled.
+- HTTP response bodies are included in network deadlines, including LINE and file operations.
+- Registered display names are read from D1; background memory work refreshes profiles. Uploaded-file deletion is delegated to the memory queue.
+- Event search uses `gemini-3.8-live` with Google Search and audio transcription, a separate search model, not a claim that Live equals latest Flash. Audio is discarded. Search output requires actual grounding queries, citation support and source URLs; ungrounded output fails closed.
+- The application search reservation cap is 450/day; this does not assert that Google grants 450 Live requests. Provider quotas still apply.
+- Release diagnostics compare two standard and two Priority fixed public greetings, then perform one public Hamamatsu search. They run once per release and send no LINE messages. These small samples check functionality, not a latency SLA.
+- Event queue concurrency remains one to preserve this single household's conversation processing. Parallelization without atomic ownership and per-chat ordering is not safe. Finite network budgets and off-queue cleanup limit avoidable blocking.
+- Fallback remains a degraded availability mode. It is not an always-latest guarantee. External outages, rate limits and recipient connectivity prevent an unconditional immediate-delivery guarantee.
+
+Sources: https://ai.google.dev/gemini-api/docs/priority-inference ; https://ai.google.dev/gemini-api/docs/pricing ; https://ai.google.dev/gemini-api/docs/live-api/tools

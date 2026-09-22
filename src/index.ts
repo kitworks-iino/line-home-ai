@@ -59,7 +59,7 @@ export default {
         version:RELEASE,
         lastReplyLatency,
         upstreamCheck,
-        events:{contextualIntent:true,defaultLocation:"静岡県浜松市",timeZone:"Asia/Tokyo",searchModels:["gemini-2.5-flash","gemini-2.5-flash-lite"],dailySearchCap:450},
+        events:{contextualIntent:true,defaultLocation:"静岡県浜松市",timeZone:"Asia/Tokyo",searchModels:env.EVENT_SEARCH_PROVIDER === "live" ? ["gemini-3.8-live"] : ["gemini-2.5-flash","gemini-2.5-flash-lite"],dailySearchCap:450},
         database,
         queues:{reply:"line-home-ai-events",memory:"line-home-ai-memory",isolated:true},
         latency:{

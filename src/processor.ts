@@ -1,3 +1,4 @@
+import { deleteGeminiFile } from "./gemini.js";
 import type { Env, LineMessage, LineQueuePayload, LineTextMessage, MessageRow, QueuePayload, ThinkingLevel } from "./types.js";
 import { ensureSchema } from "./schema.js";
 import {
@@ -229,6 +230,10 @@ async function maintainMemory(env: Env, groupId: string): Promise<void> {
   }
 
   const members = await listMembers(env, groupId);
+  await Promise.all(members.map(async member => {
+    const name = await getGroupMemberProfile(env,groupId,member.user_id);
+    if (name !== `LINE user ${member.user_id.slice(-6)}` && name !== member.display_name) { await updateMemberName(env,groupId,member.user_id,name); member.display_name=name; }
+  }));
   const existing = await listMemories(env, groupId, "", 120);
   const extracted = await extractMemory(env, memoryExtractionPrompt(messages, existing, members));
   if (!extracted) {
@@ -397,7 +402,8 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
     }
 
     const userId = event.source.userId;
-    const displayName = await getGroupMemberProfile(env, groupId, userId);
+    const knownMember = await getMember(env, groupId, userId);
+    const displayName = knownMember?.display_name ?? await getGroupMemberProfile(env, groupId, userId);
     const command = textMessage(event.message) ? parseCommand(event.message.text) : null;
     if (command) {
       const outcome = await handleCommand(env, payload, key, groupId, userId, displayName, command);
@@ -471,9 +477,10 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
       timings.inputChars = system.length + (simpleGreeting ? cleaned.length : prompt.length);
       timings.thinking = thinking;
       timings.path = simpleGreeting ? "greeting" : "conversation";
+      const generationDeadline = started + (deepPrompt ? asInt(env.GEMINI_DEEP_DEADLINE_MS,180_000,30_000,300_000) : asInt(env.GEMINI_REPLY_DEADLINE_MS,60_000,20_000,180_000)) - 20_000;
       const generated = simpleGreeting
-        ? await greetingAnswer(env, system, cleaned)
-        : await routedAnswer(env, system, prompt, media.inputs, thinking, saved.created_at);
+        ? await greetingAnswer(env, system, cleaned, generationDeadline)
+        : await routedAnswer(env, system, prompt, media.inputs, thinking, saved.created_at, undefined, generationDeadline);
       timings.model = generated.model ?? "none";
       timings.fallbackCount = generated.routeFailures.length;
       timings.generationMs = Date.now() - phase;
@@ -516,6 +523,10 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
 
 export async function processQueuePayload(env: Env, payload: QueuePayload): Promise<void> {
   await ensureSchema(env);
+  if (payload.kind === "cleanup") {
+    for (const file of payload.files) if (/^files\/[a-zA-Z0-9_-]+$/.test(file)) await deleteGeminiFile(env,file);
+    return;
+  }
   if (payload.kind === "diagnostic") {
     await runReleaseCheck(env, payload.release);
     return;

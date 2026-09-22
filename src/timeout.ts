@@ -18,13 +18,23 @@ export async function fetchWithTimeout(
   label: string,
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch (error) {
-    if (controller.signal.aborted) throw new UpstreamTimeoutError(label, timeoutMs);
-    throw error;
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(input, { ...init, signal: controller.signal });
+        // Buffer under the same deadline: callers cannot hang on a partial body.
+        const body = response.body ? await response.arrayBuffer() : null;
+        return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new UpstreamTimeoutError(label, timeoutMs));
+        }, Math.max(0, timeoutMs));
+      }),
+    ]);
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }

@@ -1,10 +1,11 @@
 export type ThinkingLevel = "low" | "medium" | "high";
 
 export interface Env {
+  EVENT_SEARCH_PROVIDER?: string;
   DB: D1Database;
   MEDIA: R2Bucket;
   EVENT_QUEUE: Queue<LineQueuePayload>;
-  MEMORY_QUEUE: Queue<MemoryQueuePayload | DiagnosticQueuePayload>;
+  MEMORY_QUEUE: Queue<MemoryQueuePayload | DiagnosticQueuePayload | CleanupQueuePayload>;
   LINE_CHANNEL_ID: string;
   LINE_CHANNEL_SECRET: string;
   GEMINI_API_KEY: string;
@@ -39,8 +40,9 @@ export interface MemoryQueuePayload {
   requestedAt: number;
 }
 
+export interface CleanupQueuePayload { kind: "cleanup"; files: string[] }
 export interface DiagnosticQueuePayload { kind: "diagnostic"; release: string }
-export type QueuePayload = LineQueuePayload | MemoryQueuePayload | DiagnosticQueuePayload;
+export type QueuePayload = LineQueuePayload | MemoryQueuePayload | DiagnosticQueuePayload | CleanupQueuePayload;
 
 export interface LineWebhookBody {
   destination: string;
