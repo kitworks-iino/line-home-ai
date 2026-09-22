@@ -1,13 +1,14 @@
 import type { Env } from "./types.js";
 import { GeminiInteractionError, outputText, requestGeminiInteraction } from "./gemini.js";
-import { greetingAnswer, routedInstruction, ROUTED_FORMAT } from "./routed-answer.js";
+import { UpstreamTimeoutError } from "./timeout.js";
 import { conversationModels } from "./model-routing.js";
 import { geminiKeyFormat } from "./gemini-key.js";
 
 // One fixed, non-personal smoke test per release. No LINE messages are sent.
-export const RELEASE = "1.5.1";
+export const RELEASE = "1.5.2";
 const KEY = `release_check:${RELEASE}`;
-type Check = { state: string; primaryModel?: string; greetingMs?: number; greetingModel?: string | null; greeting?: string; searchDiagnostics?: Array<{model:string;status:number;response:string}>; conversationMs?: number; searchMs?: number; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
+type Probe = { model: string; elapsedMs: number; outcome: string };
+type Check = { probes?: Probe[]; state: string; primaryModel?: string; greetingMs?: number; greetingModel?: string | null; greeting?: string; searchDiagnostics?: Array<{model:string;status:number;response:string}>; conversationMs?: number; searchMs?: number; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
 
 // Only called for the fixed arithmetic probe: never expose errors for household prompts.
 function fixedProbeMessage(error: GeminiInteractionError, key: string): string {
@@ -39,35 +40,31 @@ export async function runReleaseCheck(env: Env, release: string): Promise<void> 
     .bind(JSON.stringify({state:"running"}),Date.now(),KEY,JSON.stringify({state:"queued"})).first<{key:string}>();
   if (!claim) return;
   let result: Check = {state:"failed",checkedAt:Date.now(),keyFormat:geminiKeyFormat(env)};
-  try {
-    let phase = Date.now();
-    const response = await requestGeminiInteraction(env,conversationModels(env)[0]!,{
-      system_instruction:routedInstruction("あなたは日本語で短く答えるアシスタントです。", Date.now()),
-      input:"接続テストです。2+2の答えを数字だけで返してください。",
-      response_format:ROUTED_FORMAT,
-      generation_config:{thinking_level:"low"},
-    },20_000,1);
-    result.conversationMs = Date.now() - phase;
-    const parsed = JSON.parse(outputText(response)) as {search?:boolean;answer?:string};
-    if (parsed.search !== false || parsed.answer?.trim() !== "4") throw new Error("unexpected smoke output");
-    result.conversation="ok";
-    result.primaryModel = conversationModels(env)[0]!;
-    phase = Date.now();
-    const greeting = await greetingAnswer(env, "あなたは日本語で短く答える家庭向けアシスタントです。", "おい");
-    result.greetingMs = Date.now() - phase;
-    result.greetingModel = greeting.model;
-    result.greeting = greeting.model ? "ok" : "failed";
-    // Already verified in 1.4.1: the free 2.5 search models reject this new account.
-    // Do not repeat known-failing probes or switch to a paid search tool.
-    result.search = "unavailable_legacy_models";
-    result.state = "partial";
-  } catch (error) {
-    result.category = error instanceof GeminiInteractionError ? error.category : "probe_failed";
-    if (error instanceof GeminiInteractionError) {
-      result.status = error.status;
-      if (!result.conversation) result.apiMessage=fixedProbeMessage(error,env.GEMINI_API_KEY);
+  result.probes = [];
+  for (const model of [...new Set([conversationModels(env)[0]!, "gemini-3.8-flash"])]) {
+    const started = Date.now();
+    try {
+      const response = await requestGeminiInteraction(env,model,{
+        system_instruction:"あなたは日本語で短く答える家庭向けアシスタントです。呼びかけに1文で返答してください。",
+        input:"おい",
+        generation_config:{thinking_level:"low",max_output_tokens:512},
+      },20_000,1);
+      if (!outputText(response).trim()) throw new Error("empty output");
+      result.probes.push({model,elapsedMs:Date.now()-started,outcome:"ok"});
+    } catch (error) {
+      const category = error instanceof UpstreamTimeoutError ? "timeout" : error instanceof GeminiInteractionError ? error.category : "probe_failed";
+      result.probes.push({model,elapsedMs:Date.now()-started,outcome:category});
+      if (error instanceof GeminiInteractionError && ["authentication","permission","billing"].includes(error.category)) {
+        result.category=category;result.status=error.status;
+        result.apiMessage=fixedProbeMessage(error,env.GEMINI_API_KEY);
+        break;
+      }
     }
   }
+  result.primaryModel=conversationModels(env)[0]!;
+  result.conversation=result.probes[0]?.outcome ?? "failed";
+  result.state=result.probes.some(p=>p.outcome==="ok") ? "partial" : "failed";
+  result.search="unavailable_legacy_models";
   result.checkedAt=Date.now();
   await env.DB.prepare("UPDATE app_state SET value=?,updated_at=? WHERE key=?").bind(JSON.stringify(result),Date.now(),KEY).run();
 }
