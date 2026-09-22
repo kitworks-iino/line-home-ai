@@ -26,7 +26,7 @@ import {
 import { runCommand } from "./commands.js";
 import { conversationPrompt, memoryExtractionPrompt, systemInstruction } from "./context.js";
 import { extractMemory, mediaInputs } from "./gemini.js";
-import { routedAnswer, isSimpleGreeting } from "./routed-answer.js";
+import { routedAnswer, isSimpleGreeting, greetingAnswer } from "./routed-answer.js";
 import { runReleaseCheck } from "./diagnostics.js";
 import { DEFAULT_IMPLICIT_FOLLOWUP_WINDOW_MS, isImplicitAssistantFollowup, mentionsAnotherUser } from "./invocation.js";
 import { allModelsExhaustedNotice, allModelsUnavailableNotice, fallbackNotice } from "./model-routing.js";
@@ -363,7 +363,7 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
   const groupId = groupIdOf(payload);
   const key = eventId(payload);
   const started = Date.now();
-  const timings: Record<string, number> = { queueMs: Math.max(0, started - payload.receivedAt) };
+  const timings: Record<string, number | string> = { queueMs: Math.max(0, started - payload.receivedAt) };
   let phase = started;
   let cleanupMedia: (() => Promise<void>) | undefined;
   console.log(`line_event_start key=${key} webhookAgeMs=${Date.now() - payload.receivedAt}`);
@@ -467,7 +467,15 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
       cleanupMedia = media.cleanup;
       const thinking: ThinkingLevel = deepPrompt ? "high" : simpleGreeting ? "low" : group.thinking_level;
       console.log(`line_ai_start key=${key} thinking=${thinking} elapsedMs=${Date.now() - started}`);
-      const generated = await routedAnswer(env, systemInstruction(group, members), prompt, media.inputs, thinking, saved.created_at);
+      const system = systemInstruction(group, members);
+      timings.inputChars = system.length + (simpleGreeting ? cleaned.length : prompt.length);
+      timings.thinking = thinking;
+      timings.path = simpleGreeting ? "greeting" : "conversation";
+      const generated = simpleGreeting
+        ? await greetingAnswer(env, system, cleaned)
+        : await routedAnswer(env, system, prompt, media.inputs, thinking, saved.created_at);
+      timings.model = generated.model ?? "none";
+      timings.fallbackCount = generated.routeFailures.length;
       timings.generationMs = Date.now() - phase;
       let response: string;
       if (generated.allModelsExhausted) {

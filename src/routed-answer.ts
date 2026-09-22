@@ -39,3 +39,9 @@ export async function routedAnswer(env: Env, system: string, prompt: string, med
     return { ...result, text: "回答の形式を正しく読み取れませんでした。もう一度聞いてください。" };
   }
 }
+
+// This path is selected only for exact standalone greetings, never a follow-up question.
+export async function greetingAnswer(env: Env, system: string, greeting: string): Promise<AnswerResult> {
+  return answer(env, `${system}\n今回は単独の呼びかけ・挨拶です。短く自然に1〜2文で応答してください。`, greeting, [], "low", undefined,
+    { modelTimeoutMs: 12_000, deadlineMs: 25_000, maxOutputTokens: 512 });
+}

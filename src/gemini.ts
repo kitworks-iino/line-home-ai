@@ -397,14 +397,14 @@ export async function mediaInputs(env: Env, messages: MessageRow[], max: number)
   return { inputs, cleanup: async () => { await Promise.all(uploaded.map((f) => deleteGeminiFile(env,f.name).catch(()=>undefined))); } };
 }
 
-export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel, responseFormat?: Record<string, unknown>): Promise<AnswerResult> {
+export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel, responseFormat?: Record<string, unknown>, limits?: { modelTimeoutMs: number; deadlineMs: number; maxOutputTokens: number }): Promise<AnswerResult> {
   const models = conversationModels(env);
   const exhaustedModels: string[] = [];
   const newlyExhaustedModels: string[] = [];
   const routeFailures: RouteFailure[] = [];
   const newRouteFailures: RouteFailure[] = [];
   const started = Date.now();
-  const deadlineAt = started + replyDeadlineMs(env, thinking);
+  const deadlineAt = started + (limits?.deadlineMs ?? replyDeadlineMs(env, thinking));
   const quotaBlocks = await loadModelQuotaBlocks(env, models).catch((error) => {
     console.warn("failed to load Gemini quota blocks; continuing with live probes", error);
     return new Map();
@@ -436,9 +436,9 @@ export async function answer(env: Env, systemInstruction: string, prompt: string
       const text = await interaction(env, model, {
         system_instruction: systemInstruction,
         input: [{type:"text",text:prompt}, ...media],
-        generation_config: { thinking_level: thinking },
+        generation_config: { thinking_level: thinking, ...(limits ? { max_output_tokens: limits.maxOutputTokens } : {}) },
         ...(responseFormat ? { response_format: responseFormat } : {}),
-      }, Math.min(modelTimeoutMs(env), remaining));
+      }, Math.min(limits?.modelTimeoutMs ?? modelTimeoutMs(env), remaining), limits ? 1 : TRANSIENT_ATTEMPTS);
       console.log(`gemini_answer_success model=${model} totalElapsedMs=${Date.now() - started}`);
       return { text, model, exhaustedModels, newlyExhaustedModels, routeFailures, newRouteFailures, allModelsExhausted: false, terminalReason: null };
     } catch (error) {

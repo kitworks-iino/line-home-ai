@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { routedAnswer, isSimpleGreeting } from '../.test-dist/routed-answer.js';
+import { routedAnswer, isSimpleGreeting, greetingAnswer } from '../.test-dist/routed-answer.js';
 
 const env = { GEMINI_API_KEY:'test', GEMINI_MODEL:'gemini-flash-latest' };
 const interaction = value => new Response(JSON.stringify({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:JSON.stringify(value)}]}]}));
@@ -51,4 +51,22 @@ test('malformed route never leaks JSON or launches a search',async t=>{
 test('only unambiguous standalone greetings take the lightweight media/reasoning path',()=>{
   for(const value of ['おい','@HOME-AI おい','こんにちは！'])assert.equal(isSimpleGreeting(value),true);
   for(const value of ['明日は？','それは？','おい 今日何する？','この写真どう？'])assert.equal(isSimpleGreeting(value),false);
+});
+
+test('greeting uses the newest full model without search schema, media or past transcript',async t=>{
+  let calls=0;
+  t.mock.method(globalThis,'fetch',async(url,init)=>{
+    calls++;
+    const body=JSON.parse(init.body);
+    assert.equal(body.model,'gemini-3.8-flash');
+    assert.equal(body.response_format,undefined);
+    assert.deepEqual(body.input,[{type:'text',text:'おい'}]);
+    assert.equal(body.generation_config.thinking_level,'low');
+    assert.equal(body.generation_config.max_output_tokens,512);
+    return new Response(JSON.stringify({status:'completed',steps:[{type:'model_output',content:[{type:'text',text:'はい、どうしました？'}]}]}));
+  });
+  const result=await greetingAnswer({...env,GEMINI_MODEL:'gemini-3.8-flash'},'家庭向けAIです。','おい');
+  assert.equal(calls,1);
+  assert.equal(result.model,'gemini-3.8-flash');
+  assert.equal(result.text,'はい、どうしました？');
 });

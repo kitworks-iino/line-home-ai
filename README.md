@@ -23,7 +23,7 @@ The repository is designed so that after Git deployment, the human setup is **UI
 - Separates raw chat history, summaries and long-term memory.
 - Runs memory maintenance as separate Queue jobs so it does not consume the LINE reply path's D1 query/latency budget.
 - Uses a dedicated memory model (`GEMINI_MEMORY_MODEL`) so long-term-memory extraction does not spend the primary conversation model's quota.
-- Uses `gemini-flash-latest` as the primary conversation alias, so Google's latest Flash release is adopted automatically when the alias is hot-swapped.
+- Uses the explicit stable `gemini-3.8-flash` as the primary conversation model, verified against the current free-tier pricing. Model updates are reviewed instead of silently following an alias.
 - Uses conversation context to recognize outing/event questions, resolve dates in Japan time, and search Hamamatsu by default with Gemini 2.5 Search grounding and cited links. Search attempts are reserved in D1 before each call, with a 450-per-day application limit.
 - On HTTP 429, does **not** retry the same exhausted model. It moves through the configured `GEMINI_FALLBACK_MODELS` ladder. When fallback succeeds, LINE first sends a model-switch notice and then the original answer from the lower model.
 - Invalidates derived memory and summaries when the originating LINE message is unsent.
@@ -40,7 +40,7 @@ The intended deployment is a **dedicated group containing only the two household
 Current defaults are configured in `wrangler.jsonc`, not hard-coded into the response logic:
 
 ```text
-Conversation primary: gemini-flash-latest
+Conversation primary: gemini-3.8-flash
 Fallbacks: gemini-3.7-flash → gemini-3.6-flash → gemini-3.5-flash → gemini-3.5-flash-lite → gemini-3.1-flash-lite
 Long-term memory: gemini-3.5-flash-lite
 ```

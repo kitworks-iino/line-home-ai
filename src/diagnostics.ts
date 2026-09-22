@@ -1,13 +1,13 @@
 import type { Env } from "./types.js";
 import { GeminiInteractionError, outputText, requestGeminiInteraction } from "./gemini.js";
-import { routedAnswer, routedInstruction, ROUTED_FORMAT } from "./routed-answer.js";
+import { greetingAnswer, routedInstruction, ROUTED_FORMAT } from "./routed-answer.js";
 import { conversationModels } from "./model-routing.js";
 import { geminiKeyFormat } from "./gemini-key.js";
 
 // One fixed, non-personal smoke test per release. No LINE messages are sent.
-export const RELEASE = "1.4.1";
+export const RELEASE = "1.5.0";
 const KEY = `release_check:${RELEASE}`;
-type Check = { state: string; searchDiagnostics?: Array<{model:string;status:number;response:string}>; conversationMs?: number; searchMs?: number; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
+type Check = { state: string; primaryModel?: string; greetingMs?: number; greetingModel?: string | null; greeting?: string; searchDiagnostics?: Array<{model:string;status:number;response:string}>; conversationMs?: number; searchMs?: number; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
 
 // Only called for the fixed arithmetic probe: never expose errors for household prompts.
 function fixedProbeMessage(error: GeminiInteractionError, key: string): string {
@@ -51,18 +51,16 @@ export async function runReleaseCheck(env: Env, release: string): Promise<void> 
     const parsed = JSON.parse(outputText(response)) as {search?:boolean;answer?:string};
     if (parsed.search !== false || parsed.answer?.trim() !== "4") throw new Error("unexpected smoke output");
     result.conversation="ok";
+    result.primaryModel = conversationModels(env)[0]!;
     phase = Date.now();
-    result.searchDiagnostics = [];
-    const generated = await routedAnswer(env,"日本語で答えてください。","【現在の依頼本文】明日の浜松市のイベントを検索して、開催日と出典リンクを教えてください。",[],"low",Date.now(), (model,status,raw) => {
-      // Only the fixed public Hamamatsu probe uses this observer; never household requests.
-      const response = raw.split(env.GEMINI_API_KEY).join("[REDACTED]").replace(/AIza[\w-]+/g,"[REDACTED]").slice(0,12000);
-      result.searchDiagnostics!.push({model,status,response});
-    });
-    const search = generated.text;
-    result.searchMs = Date.now() - phase;
-    result.search = search?.includes("参照リンク") && /https?:\/\//.test(search) ? "ok" : "unavailable";
-    result.searchPreview = (search ?? "分類結果なし").slice(0,6000);
-    result.state = result.search === "ok" ? "passed" : "partial";
+    const greeting = await greetingAnswer(env, "あなたは日本語で短く答える家庭向けアシスタントです。", "おい");
+    result.greetingMs = Date.now() - phase;
+    result.greetingModel = greeting.model;
+    result.greeting = greeting.model ? "ok" : "failed";
+    // Already verified in 1.4.1: the free 2.5 search models reject this new account.
+    // Do not repeat known-failing probes or switch to a paid search tool.
+    result.search = "unavailable_legacy_models";
+    result.state = "partial";
   } catch (error) {
     result.category = error instanceof GeminiInteractionError ? error.category : "probe_failed";
     if (error instanceof GeminiInteractionError) {

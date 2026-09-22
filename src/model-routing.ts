@@ -33,7 +33,7 @@ function uniqueModels(models: string[]): string[] {
 }
 
 export function conversationModels(env: Pick<Env, "GEMINI_MODEL" | "GEMINI_FALLBACK_MODELS">): string[] {
-  const primary = env.GEMINI_MODEL?.trim() || "gemini-flash-latest";
+  const primary = env.GEMINI_MODEL?.trim() || "gemini-3.8-flash";
   const fallbacks = (env.GEMINI_FALLBACK_MODELS ?? "")
     .split(",")
     .map((m) => m.trim())
@@ -74,7 +74,7 @@ export function fallbackNotice(failures: RouteFailure[], activeModel: string): s
   if (failures.length === 0) return null;
   const chain = [...failures.map((failure) => modelDisplayName(failure.model)), modelDisplayName(activeModel)].join(" → ");
   const reasons = [...new Set(failures.map((failure) => reasonText(failure.reason)))].join("・");
-  return `上位モデルで${reasons}が発生したため、会話モデルを切り替えます。\n${chain}\n今回は ${modelDisplayName(activeModel)} が対応します！`;
+  return `優先モデルで${reasons}が発生したため、会話モデルを切り替えます。\n${chain}\n今回は ${modelDisplayName(activeModel)} が対応します！`;
 }
 
 export function allModelsExhaustedNotice(models: string[]): string {
