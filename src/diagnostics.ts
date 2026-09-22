@@ -5,7 +5,7 @@ import { conversationModels } from "./model-routing.js";
 import { geminiKeyFormat } from "./gemini-key.js";
 
 // One fixed, non-personal smoke test per release. No LINE messages are sent.
-export const RELEASE = "1.5.0";
+export const RELEASE = "1.5.1";
 const KEY = `release_check:${RELEASE}`;
 type Check = { state: string; primaryModel?: string; greetingMs?: number; greetingModel?: string | null; greeting?: string; searchDiagnostics?: Array<{model:string;status:number;response:string}>; conversationMs?: number; searchMs?: number; checkedAt?: number; conversation?: string; search?: string; status?: number; category?: string; searchPreview?: string; apiMessage?: string; keyFormat?: ReturnType<typeof geminiKeyFormat> };
 

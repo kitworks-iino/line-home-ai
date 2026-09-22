@@ -33,7 +33,7 @@ function uniqueModels(models: string[]): string[] {
 }
 
 export function conversationModels(env: Pick<Env, "GEMINI_MODEL" | "GEMINI_FALLBACK_MODELS">): string[] {
-  const primary = env.GEMINI_MODEL?.trim() || "gemini-3.8-flash";
+  const primary = env.GEMINI_MODEL?.trim() || "gemini-flash-latest";
   const fallbacks = (env.GEMINI_FALLBACK_MODELS ?? "")
     .split(",")
     .map((m) => m.trim())
