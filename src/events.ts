@@ -1,3 +1,4 @@
+import { liveSearch, LIVE_SEARCH_MODEL } from "./live-search.js";
 import type { Env } from "./types.js";
 import { GeminiInteractionError, outputText, requestGeminiInteraction } from "./gemini.js";
 import { conversationModels, loadModelQuotaBlocks, quotaBlockFrom429, saveModelQuotaBlock } from "./model-routing.js";
@@ -251,6 +252,20 @@ export async function eventAnswer(env: Env, prompt: string, now = Date.now()): P
 }
 
 export async function searchEventIntent(env: Env, intent: EventIntent, deadline = Date.now() + 45_000, observe?: (model: string, status: number, raw: string) => void): Promise<string> {
+  if (env.EVENT_SEARCH_PROVIDER === "live") {
+    const remaining = deadline - Date.now();
+    if (remaining < 1000) return SEARCH_UNAVAILABLE;
+    if (!(await reserveSearchRequest(env))) return "イベント検索の利用上限に達しました。時間を置いて、もう一度聞いてください。";
+    try {
+      const result = await liveSearch(env, publicSearchPrompt(intent), Math.min(35_000,remaining));
+      observe?.(LIVE_SEARCH_MODEL,200,JSON.stringify({textLength:result.text.length,metadata:result.metadata}));
+      return groundedEventText({candidates:[{finishReason:"STOP",content:{parts:[{text:result.text}]},groundingMetadata:result.metadata}]}) ?? SEARCH_UNAVAILABLE;
+    } catch (error) {
+      observe?.(LIVE_SEARCH_MODEL,503,JSON.stringify({error:error instanceof Error ? error.message : "Live search failed"}));
+      console.warn("live_event_search_failed");
+      return SEARCH_UNAVAILABLE;
+    }
+  }
   const blocks = await loadModelQuotaBlocks(env, [...SEARCH_MODELS]).catch(() => new Map());
   for (const model of SEARCH_MODELS) {
     if (blocks.has(model)) continue;

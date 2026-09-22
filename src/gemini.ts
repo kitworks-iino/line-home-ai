@@ -21,6 +21,9 @@ export interface RouteFailure { model: string; reason: RouteFailureReason }
 
 export interface InteractionResponse {
   id?: string;
+  model?: string;
+  service_tier?: string;
+  servedTier?: string;
   status?: string;
   error?: { message?: string };
   errors?: Array<{ code?: string; message?: string }>;
@@ -181,6 +184,7 @@ export async function requestGeminiInteraction(
   const deadline = Date.now() + timeoutMs;
   let requestBody = body;
   let thinkingRetried = false;
+  let priorityRetried = false;
   let transientRetries = 0;
   for (let attempt = 0; ; attempt++) {
     const started = Date.now();
@@ -241,11 +245,19 @@ export async function requestGeminiInteraction(
         await logApiFailure(env, error);
         throw error;
       }
+      const servedTier = res.headers.get("x-gemini-service-tier") ?? json.service_tier;
+      if (servedTier) json.servedTier = servedTier;
       return json;
     }
 
     const error = new GeminiInteractionError(res.status, raw, model);
     await logApiFailure(env, error);
+    if (!priorityRetried && requestBody.service_tier === "priority" && res.status === 400 && /service[_ .-]?tier|priority/i.test(error.raw) && /unsupported|not supported|unknown|invalid/i.test(error.raw)) {
+      const { service_tier: _tier, ...standardBody } = requestBody;
+      requestBody = standardBody;
+      priorityRetried = true;
+      continue;
+    }
     const config = requestBody.generation_config as Record<string,unknown> | undefined;
     if (error.category === "thinking_unsupported" && !thinkingRetried && config?.thinking_level !== undefined) {
       // Only an explicit parameter rejection triggers this compatibility adjustment.
@@ -351,7 +363,7 @@ async function waitForGeminiFileReady(env: Env, name: string): Promise<void> {
   throw new UpstreamTimeoutError("Gemini file processing", deadline - (deadline - Math.min(60_000, Math.max(30_000, modelTimeoutMs(env)))));
 }
 
-async function deleteGeminiFile(env: Env, name: string): Promise<void> {
+export async function deleteGeminiFile(env: Env, name: string): Promise<void> {
   await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1beta/${name}`,
     { method: "DELETE", headers: { "x-goog-api-key": geminiApiKey(env) } },
@@ -394,17 +406,17 @@ export async function mediaInputs(env: Env, messages: MessageRow[], max: number)
       inputs.push({ type, mime_type:f.mime_type, uri:f.uri });
     }
   }
-  return { inputs, cleanup: async () => { await Promise.all(uploaded.map((f) => deleteGeminiFile(env,f.name).catch(()=>undefined))); } };
+  return { inputs, cleanup: async () => { if (uploaded.length) await env.MEMORY_QUEUE.send({kind:"cleanup",files:uploaded.map(f=>f.name)},{contentType:"json"}); } };
 }
 
-export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel, responseFormat?: Record<string, unknown>, limits?: { modelTimeoutMs: number; deadlineMs: number; maxOutputTokens: number }): Promise<AnswerResult> {
+export async function answer(env: Env, systemInstruction: string, prompt: string, media: GeminiInput[], thinking: ThinkingLevel, responseFormat?: Record<string, unknown>, limits?: { modelTimeoutMs: number; deadlineMs: number; maxOutputTokens: number; deadlineAt?: number | undefined }): Promise<AnswerResult> {
   const models = conversationModels(env);
   const exhaustedModels: string[] = [];
   const newlyExhaustedModels: string[] = [];
   const routeFailures: RouteFailure[] = [];
   const newRouteFailures: RouteFailure[] = [];
   const started = Date.now();
-  const deadlineAt = started + (limits?.deadlineMs ?? replyDeadlineMs(env, thinking));
+  const deadlineAt = Math.min(limits?.deadlineAt ?? Infinity, started + (limits?.deadlineMs ?? replyDeadlineMs(env, thinking)));
   const quotaBlocks = await loadModelQuotaBlocks(env, models).catch((error) => {
     console.warn("failed to load Gemini quota blocks; continuing with live probes", error);
     return new Map();
@@ -433,12 +445,15 @@ export async function answer(env: Env, systemInstruction: string, prompt: string
     }
 
     try {
-      const text = await interaction(env, model, {
+      const response = await requestGeminiInteraction(env, model, {
+        service_tier: "priority",
         system_instruction: systemInstruction,
         input: [{type:"text",text:prompt}, ...media],
         generation_config: { thinking_level: thinking, ...(limits ? { max_output_tokens: limits.maxOutputTokens } : {}) },
         ...(responseFormat ? { response_format: responseFormat } : {}),
       }, Math.min(limits?.modelTimeoutMs ?? modelTimeoutMs(env), remaining), limits ? 1 : TRANSIENT_ATTEMPTS);
+      const text = outputText(response);
+      console.log("gemini_served", JSON.stringify({requestedModel:model,returnedModel:response.model,servedTier:response.servedTier}));
       console.log(`gemini_answer_success model=${model} totalElapsedMs=${Date.now() - started}`);
       return { text, model, exhaustedModels, newlyExhaustedModels, routeFailures, newRouteFailures, allModelsExhausted: false, terminalReason: null };
     } catch (error) {

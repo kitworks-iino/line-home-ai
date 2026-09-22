@@ -13,6 +13,32 @@ const quotaResponse=()=>new Response(JSON.stringify({
   error:{code:429,status:'RESOURCE_EXHAUSTED',message:'quota exceeded'},
 }),{status:429,headers:{'content-type':'application/json'}});
 
+test('unsupported Priority retries the same latest model in standard tier',async(t)=>{
+  const calls=[];
+  t.mock.method(globalThis,'fetch',async(_url,init)=>{
+    calls.push(JSON.parse(init.body));
+    return calls.length===1 ? new Response('{"error":{"message":"service_tier priority unsupported"}}',{status:400}) : okInteraction('ok');
+  });
+  const response=await requestGeminiInteraction({GEMINI_API_KEY:'test'},'gemini-flash-latest',{input:'hi',service_tier:'priority'},1000,1);
+  assert.equal(response.status,'completed');
+  assert.deepEqual(calls.map(x=>x.model),['gemini-flash-latest','gemini-flash-latest']);
+  assert.equal(calls[1].service_tier,undefined);
+});
+
+test('served tier is read from provider header, not assumed from requested priority',async(t)=>{
+  t.mock.method(globalThis,'fetch',async()=>{
+    const response=okInteraction('ok');response.headers.set('x-gemini-service-tier','standard');return response;
+  });
+  const response=await requestGeminiInteraction({GEMINI_API_KEY:'test'},'gemini-flash-latest',{input:'hi',service_tier:'priority'},1000,1);
+  assert.equal(response.servedTier,'standard');
+});
+
+test('spent shared budget does not start another model request',async(t)=>{
+  t.mock.method(globalThis,'fetch',async()=>{throw new Error('must not fetch');});
+  const result=await answer({GEMINI_MODEL:'gemini-flash-latest'},'system','hi',[],'low',undefined,{modelTimeoutMs:20000,deadlineMs:35000,maxOutputTokens:512,deadlineAt:Date.now()-1});
+  assert.equal(result.terminalReason,'deadline');
+});
+
 test('production array-wrapped API_KEY_INVALID is classified as authentication without exposing its payload',()=>{
   const error=new GeminiInteractionError(400,JSON.stringify([{error:{code:400,message:'API key not valid. Please pass a valid API key.',status:'INVALID_ARGUMENT',details:[{reason:'API_KEY_INVALID'}]}}]),'gemini-flash-latest');
   assert.equal(error.category,'authentication');
