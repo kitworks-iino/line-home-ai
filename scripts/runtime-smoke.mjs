@@ -3,7 +3,7 @@ import { Miniflare } from 'miniflare';
 import assert from 'node:assert/strict';
 
 const source = `
-import { mediaStore, mediaDigest, MEDIA_CHUNK_BYTES, MEDIA_FILE_BYTES } from './src/media-store.ts';
+import { mediaStore, mediaDigest } from './src/media-store.ts';
 export default { async fetch(request,env) {
   const size=Number(new URL(request.url).searchParams.get('size'));
   const store=mediaStore(env), group='runtime-test', key='groups/'+group+'/media/test';
@@ -19,7 +19,7 @@ export default { async fetch(request,env) {
   return Response.json({correct,prevented,usage,after:await store.usage(),r2Absent:!('MEDIA' in env)});
 }};`;
 const output=await build({stdin:{contents:source,resolveDir:process.cwd(),sourcefile:'runtime-entry.ts',loader:'ts'},bundle:true,write:false,format:'esm',platform:'browser',target:'es2022'});
-const mf=new Miniflare({modules:true,script:output.outputFiles[0].text,compatibilityDate:'2026-09-03',d1Databases:{MEDIA_DB:'test-media-db'}});
+const mf=new Miniflare({workers:[{name:'storage-test',modules:true,script:output.outputFiles[0].text,compatibilityDate:'2026-09-03',d1Databases:{MEDIA_DB:'test-media-db'}}]});
 try {
   for(const size of [0,1024*1024+17,16*1024*1024]) {
     const response=await mf.dispatchFetch('https://runtime.test/?size='+size);

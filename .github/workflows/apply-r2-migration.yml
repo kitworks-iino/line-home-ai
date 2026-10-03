@@ -4,6 +4,8 @@ on:
     branches: [fix/d1-attachments-without-r2]
     paths:
       - scripts/apply-r2-migration.py
+      - scripts/runtime-smoke.mjs
+      - src/media-store.ts
       - .github/workflows/apply-r2-migration.yml
 permissions:
   contents: read
