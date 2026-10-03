@@ -5,10 +5,10 @@ A production-oriented **LINE family group AI** for two approved household member
 - LINE Messaging API
 - Cloudflare Workers + Queues
 - Cloudflare D1
-- Cloudflare R2
+- Cloudflare D1 (dedicated attachment database; no R2 subscription required)
 - Gemini Flash latest + quota fallback routing
 
-The repository is designed so that after Git deployment, the human setup is **UI configuration only**: create/enable the LINE Messaging API account, obtain the Gemini API key, import this repository into Cloudflare, enter four secrets, and register the LINE webhook. D1, R2, the processing Queue and the dead-letter Queue are declared in `wrangler.jsonc` and are automatically provisioned/bound by current Wrangler/Cloudflare deployment behavior.
+The repository is designed so that after Git deployment, the human setup is **UI configuration only**: create/enable the LINE Messaging API account, obtain the Gemini API key, import this repository into Cloudflare, enter four secrets, and register the LINE webhook. The two existing D1 databases are explicitly bound in `wrangler.jsonc`; the existing Queues are maintained. Forks must set their own D1 IDs. R2 is not provisioned.
 
 ## What it does
 
@@ -18,8 +18,8 @@ The repository is designed so that after Git deployment, the human setup is **UI
 - Starts an AI turn when explicitly called (`@Home AI`, `GPT、`, `AI、`, typed `HOME-AI`), via `/deep`, or by quoting/replying to an AI message.
 - Once Home AI has just replied, the next unquoted household message is treated as a natural follow-up for up to 10 minutes, so ordinary back-and-forth does not require another `@Home AI` on every turn. A reply/quote or explicit LINE mention directed at the other household member suppresses this adjacency inference.
 - Supports LINE text, location, sticker metadata, images, audio, video and files.
-- Stores binary media in R2 and includes recent relevant media in Gemini multimodal context.
-- Keeps R2 binary storage at or below the full **10 GB Standard free-storage boundary** (`10,000,000,000` bytes) instead of using an arbitrary safety margin; `/usage` shows actual R2 object bytes.
+- Stores binary media in a dedicated D1 database and includes recent relevant media in Gemini multimodal context.
+- Stores at most **300 MB raw attachments total / 16 MiB per file**, using atomic D1 transactions and checksums. `/usage` shows persisted bytes. This is smaller than the former R2 capacity. No automatic data eviction or new billing subscription is used.
 - Separates raw chat history, summaries and long-term memory.
 - Runs memory maintenance as separate Queue jobs so it does not consume the LINE reply path's D1 query/latency budget.
 - Uses a dedicated memory model (`GEMINI_MEMORY_MODEL`) so long-term-memory extraction does not spend the primary conversation model's quota.
@@ -53,7 +53,7 @@ A 429 from one conversation model causes one attempt on the next model; the exha
 
 Design details: **[Architecture](docs/ARCHITECTURE.md)**
 
-R2 billing/free-tier behavior: **[R2 Free Tier](docs/R2_FREE_TIER.md)**
+Attachment limits and migration: **[D1 media storage](docs/D1_MEDIA.md)**
 
 Google AI Pro benefits, API billing requirements, event search and HTTP 400 handling: **[Google AI and Search / 日本語](docs/GOOGLE_AI_AND_SEARCH.md)**
 

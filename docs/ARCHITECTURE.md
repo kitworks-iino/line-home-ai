@@ -12,7 +12,7 @@ A private household AI that lives in one LINE group and is usable by exactly two
 4. The reply Queue consumer runs with `max_concurrency=1` to preserve household conversation ordering.
 5. LINE-event jobs handle authorization, persistence, AI invocation and delivery. Long-term-memory maintenance is sent to a physically separate Queue (`line-home-ai-memory`) so a slow memory extraction cannot occupy the reply consumer.
 6. D1 keeps idempotency (`webhookEventId`), membership, messages, summaries, memories and persistent Gemini quota blocks.
-7. Binary LINE content is copied into R2 under `groups/{groupId}/media/{messageId}`.
+7. Binary LINE content is copied into the dedicated D1 media database under `groups/{groupId}/media/{messageId}`.
 8. An AI turn starts on an explicit bot @mention, a natural prefix (`GPT、`, `AI、`, `Home AI`, `HOME-AI`), `/deep`, a quoted reply to a previous AI message, or an implicit conversational follow-up as described below.
 9. Normal conversation uses the configured Gemini Flash routing chain through the Interactions API with `store:false`. The primary is `gemini-flash-latest`; quota exhaustion, a model timeout, HTTP 524, or a transient upstream failure can move the request to the next configured model.
 10. Long-term-memory extraction uses a separate configured model (`GEMINI_MEMORY_MODEL`) and does not consume the primary conversation model's quota. A memory-model quota/timeout/transient outage postpones extraction without advancing the memory cursor.
@@ -68,7 +68,7 @@ Timeouts and transient 5xx errors are not persisted as quota exhaustion. They ca
 
 Three layers are intentionally separate:
 
-- **Raw messages**: approved-member messages and AI replies. A LINE unsend event nulls source text/media metadata and deletes the corresponding R2 object.
+- **Raw messages**: approved-member messages and AI replies. A LINE unsend event nulls source text/media metadata and deletes the corresponding D1 attachment and chunks.
 - **Summary segments**: configured batches of approved-user messages are compressed into factual conversation summaries by a memory Queue job.
 - **Long-term memories**: durable facts, preferences, plans and explicit agreements. Automatic memories retain source LINE message IDs and extraction is capped to a bounded number of changes per batch.
 
@@ -91,7 +91,7 @@ Deployments created before this split may still have old `kind=memory` messages 
 - Only the admin can approve with `/approve CODE`.
 - Unapproved members' ordinary messages are neither persisted nor sent to Gemini.
 - The configured household size is two approved members.
-- `/delete-data DELETE ALL` deletes D1 household state and every R2 object under that group's prefix, then unbinds the Worker.
+- `/delete-data DELETE ALL` deletes D1 household state and every D1 attachment for that group, then unbinds the Worker.
 
 Application-level approval does **not** hide bot messages from other humans who are physically present in the LINE group. The intended deployment is therefore a dedicated LINE group containing only the two household members and the Home AI official account.
 
@@ -115,7 +115,12 @@ D1 Free has a per-Worker-invocation query ceiling. Memory extraction runs in its
 
 ## Multimodal handling
 
-- LINE binary content is copied to R2 while the source content is still retrievable.
+- LINE binary content is copied to D1 while the source content is still retrievable.
 - Only media from the local recent-message window is sent to Gemini when the AI is invoked; old unrelated attachments are not resent on every request.
 - Small supported image/audio/video/PDF inputs are sent inline. Large supported files use Gemini Files API; upload/status calls also have bounded network waits, and temporary Gemini files are deleted after the interaction.
-- Text-like files are decoded and included as text. Unsupported binary MIME types remain stored in R2 and are represented by metadata rather than causing the whole AI request to fail.
+- Text-like files are decoded and included as text. Unsupported binary MIME types remain stored in D1 and are represented by metadata rather than causing the whole AI request to fail.
+
+
+## R2-free storage (1.7.0)
+
+MEDIA_DB is separate from the conversation DB. See [D1 storage](D1_MEDIA.md) for capacities, transactions, cancellation handling, bounded downloads and verification. R2 bindings are removed and preview URLs are disabled. Schema initialization is cached per binding; a persistent schema marker avoids repeated cold-start migrations.

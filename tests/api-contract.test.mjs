@@ -1,3 +1,5 @@
+import { mediaEnv as makeMediaEnv } from './helpers/sqlite-d1.mjs';
+import { mediaStore } from '../.test-dist/media-store.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { answer, extractMemory, mediaInputs } from '../.test-dist/gemini.js';
@@ -39,11 +41,12 @@ test('memory extraction uses the current structured output request contract',asy
   assert.equal(request.store,false);
 });
 
-const attachment=(id,mime)=>({line_message_id:id,media_key:id,mime_type:mime,sender_name:'家族',type:mime.split('/')[0],unsent:0});
-const mediaEnv={MEDIA:{async get(){return {async arrayBuffer(){return new Uint8Array([1,2,3]).buffer;}};}}};
+const attachment=(id,mime)=>({line_message_id:id,media_key:`groups/test/media/${id}`,mime_type:mime,sender_name:'家族',type:mime.split('/')[0],unsent:0});
+const mediaEnv=makeMediaEnv();
+for (const id of ['a','b','c','svg','audio']) await mediaStore(mediaEnv).put(`groups/test/media/${id}`,new Uint8Array([1,2,3]).buffer,{contentType:'application/octet-stream'});
 
 test('zero media context excludes all previous attachments without reading storage',async()=>{
-  const env={MEDIA:{async get(){throw new Error('storage must not be read');}}};
+  const env={}; // Zero context must never open a database.
   const result=await mediaInputs(env,[attachment('a','image/png')],0);
   assert.deepEqual(result.inputs,[]);
   await result.cleanup();

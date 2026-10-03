@@ -1,3 +1,5 @@
+import { runStorageVerification } from "./storage-verification.js";
+import { mediaStore, MediaLimitError, mediaFailureMessage } from "./media-store.js";
 import { deleteGeminiFile } from "./gemini.js";
 import type { Env, LineMessage, LineQueuePayload, LineTextMessage, MessageRow, QueuePayload, ThinkingLevel } from "./types.js";
 import { ensureSchema } from "./schema.js";
@@ -97,13 +99,7 @@ async function previousMessageBefore(env: Env, groupId: string, saved: MessageRo
 }
 
 async function removeGroupMedia(env: Env, groupId: string): Promise<void> {
-  const prefix = `groups/${groupId}/`;
-  let cursor: string | undefined;
-  do {
-    const page = await env.MEDIA.list(cursor ? { prefix, cursor, limit: 1000 } : { prefix, limit: 1000 });
-    if (page.objects.length) await env.MEDIA.delete(page.objects.map((o) => o.key));
-    cursor = page.truncated ? page.cursor : undefined;
-  } while (cursor);
+  await mediaStore(env).deleteGroup(groupId);
 }
 
 async function deliver(
@@ -152,6 +148,11 @@ async function persistIncoming(
   timestamp: number,
   textOverride?: string,
 ): Promise<MessageRow> {
+  // Queue redelivery reuses committed metadata instead of fetching/saving again.
+  const existing = await env.DB.prepare("SELECT * FROM messages WHERE group_id=? AND line_message_id=?")
+    .bind(groupId, message.id).first<MessageRow>();
+  if (existing) return existing;
+  let cancelled = false;
   let text: string | null = textOverride ?? null;
   let mediaKey: string | null = null;
   let mimeType: string | null = null;
@@ -167,28 +168,26 @@ async function persistIncoming(
     const keywords = message.keywords?.length ? ` keywords=${message.keywords.join(",")}` : "";
     text = `[スタンプ package=${message.packageId} sticker=${message.stickerId}${keywords}]`;
   } else if (["image", "video", "audio", "file"].includes(message.type)) {
-    const content = await getMessageContent(env, message.id);
-    mediaKey = `groups/${groupId}/media/${message.id}`;
-    mimeType = content.contentType;
-    mediaSize = content.buffer.byteLength;
-    const metadata: Record<string, string> = {
-      groupId,
-      lineMessageId: message.id,
-      senderUserId: userId,
-      senderName: displayName,
-      messageType: message.type,
-    };
-    if ("fileName" in message && message.fileName) metadata.fileName = message.fileName;
-    await env.MEDIA.put(mediaKey, content.buffer, {
-      httpMetadata: { contentType: mimeType },
-      customMetadata: metadata,
-    });
-    if (message.type === "file" && "fileName" in message && message.fileName) text = `[ファイル: ${message.fileName}]`;
+    try {
+      const content = await getMessageContent(env, message.id);
+      const key = `groups/${groupId}/media/${message.id}`;
+      const metadata: Record<string, string> = { groupId, lineMessageId: message.id, senderUserId: userId, senderName: displayName, messageType: message.type };
+      if ("fileName" in message && message.fileName) metadata.fileName = message.fileName;
+      await mediaStore(env).put(key, content.buffer, { contentType: content.contentType, metadata });
+      mediaKey = key;
+      mimeType = content.contentType;
+      mediaSize = content.buffer.byteLength;
+      if (message.type === "file" && "fileName" in message && message.fileName) text = `[ファイル: ${message.fileName}]`;
+    } catch (error) {
+      if (!(error instanceof MediaLimitError)) throw error;
+      cancelled = error.code === "cancelled";
+      text = `[添付未保存] ${mediaFailureMessage(error, env)}`;
+    }
   } else {
     text = `[${message.type}]`;
   }
 
-  return saveUserMessage(env, {
+  const saved = await saveUserMessage(env, {
     group_id: groupId,
     line_message_id: message.id,
     webhook_event_id: eventKey,
@@ -202,6 +201,11 @@ async function persistIncoming(
     quoted_message_id: quotedMessageId(message),
     created_at: timestamp,
   });
+  if (cancelled) {
+    await unsendMessage(env, groupId, message.id);
+    return { ...saved, unsent: 1, text: null, media_key: null, mime_type: null, media_size: null };
+  }
+  return saved;
 }
 
 async function enqueueMemoryMaintenance(env: Env, groupId: string): Promise<void> {
@@ -389,8 +393,9 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
 
     if (event.type === "unsend" && event.unsend?.messageId) {
       if (bound === groupId) {
-        const mediaKey = await unsendMessage(env, groupId, event.unsend.messageId);
-        if (mediaKey) await env.MEDIA.delete(mediaKey);
+        // Delete first and retain a cancellation key, so retries cannot restore cancelled media.
+        await mediaStore(env).delete(`groups/${groupId}/media/${event.unsend.messageId}`);
+        await unsendMessage(env, groupId, event.unsend.messageId);
       }
       await completeEvent(env, key);
       return;
@@ -420,6 +425,12 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
 
     const deepPrompt = command?.name === "deep" ? command.args.trim() : undefined;
     const saved = await persistIncoming(env, groupId, key, userId, displayName, event.message, event.timestamp, deepPrompt);
+    if (saved.unsent) { await completeEvent(env, key); return; }
+    if (["image", "video", "audio", "file"].includes(saved.type) && !saved.media_key && saved.text?.startsWith("[添付未保存]")) {
+      await deliver(env, key, groupId, event.replyToken, event.timestamp, saved.text, false);
+      await completeEvent(env, key);
+      return;
+    }
 
     let invoked = Boolean(deepPrompt);
     if (textMessage(event.message)) invoked ||= hasSelfMention(event.message) || hasNaturalInvocation(event.message.text);
@@ -523,6 +534,10 @@ async function processLinePayload(env: Env, payload: LineQueuePayload): Promise<
 
 export async function processQueuePayload(env: Env, payload: QueuePayload): Promise<void> {
   await ensureSchema(env);
+  if (payload.kind === "verify-storage") {
+    await runStorageVerification(env, payload.release, payload.runId, payload.notify === true);
+    return;
+  }
   if (payload.kind === "cleanup") {
     for (const file of payload.files) if (/^files\/[a-zA-Z0-9_-]+$/.test(file)) await deleteGeminiFile(env,file);
     return;

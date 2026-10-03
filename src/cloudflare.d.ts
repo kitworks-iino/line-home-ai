@@ -14,21 +14,6 @@ interface D1Database {
   batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
   exec(query: string): Promise<{ count: number; duration: number }>;
 }
-interface R2ObjectBody {
-  key: string;
-  size: number;
-  httpMetadata?: { contentType?: string };
-  customMetadata?: Record<string, string>;
-  arrayBuffer(): Promise<ArrayBuffer>;
-}
-interface R2Object { key: string; size: number }
-interface R2Objects { objects: R2Object[]; truncated: boolean; cursor?: string }
-interface R2Bucket {
-  put(key: string, value: ArrayBuffer | ArrayBufferView | ReadableStream | string, options?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<R2Object | null>;
-  get(key: string): Promise<R2ObjectBody | null>;
-  delete(keys: string | string[]): Promise<void>;
-  list(options?: { prefix?: string; cursor?: string; limit?: number }): Promise<R2Objects>;
-}
 interface Queue<Body = unknown> { send(body: Body, options?: { contentType?: "json" | "text" | "bytes"; delaySeconds?: number }): Promise<void> }
 interface Message<Body = unknown> { body: Body; attempts: number; ack(): void; retry(options?: { delaySeconds?: number }): void }
 interface MessageBatch<Body = unknown> { queue: string; messages: Message<Body>[] }

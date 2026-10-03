@@ -1,5 +1,5 @@
 import type { Env } from "./types.js";
-import { canStoreWithinR2Limit, r2HardLimitBytes, r2StorageUsage } from "./r2-guard.js";
+import { mediaFileLimitBytes, MediaLimitError, readBoundedMedia } from "./media-store.js";
 import { boundedMs, fetchWithTimeout } from "./timeout.js";
 import { splitLineText } from "./util.js";
 
@@ -27,12 +27,12 @@ async function lineToken(env: Env): Promise<string> {
   return json.access_token;
 }
 
-async function lineFetch(env: Env, url: string, init: RequestInit = {}): Promise<Response> {
+async function lineFetch(env: Env, url: string, init: RequestInit = {}, maxResponseBytes?: number): Promise<Response> {
   const execute = async (): Promise<Response> => {
     const token = await lineToken(env);
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${token}`);
-    return fetchWithTimeout(url, { ...init, headers }, lineApiTimeoutMs(env), "LINE Messaging API");
+    return fetchWithTimeout(url, { ...init, headers }, lineApiTimeoutMs(env), "LINE Messaging API", maxResponseBytes);
   };
   let res = await execute();
   if (res.status === 401) {
@@ -61,17 +61,11 @@ export async function getGroupMemberProfile(env: Env, groupId: string, userId: s
 }
 
 export async function getMessageContent(env: Env, messageId: string): Promise<{buffer:ArrayBuffer;contentType:string}> {
-  const res = await lineFetch(env, `https://api-data.line.me/v2/bot/message/${encodeURIComponent(messageId)}/content`);
-  if (!res.ok) throw new Error(`LINE content fetch failed: ${res.status} ${await res.text()}`);
-  const buffer = await res.arrayBuffer();
+  const res = await lineFetch(env, `https://api-data.line.me/v2/bot/message/${encodeURIComponent(messageId)}/content`, {}, mediaFileLimitBytes(env));
+  if (res.status === 404 || res.status === 410) throw new MediaLimitError("expired");
+  if (!res.ok) throw new Error(`LINE content fetch failed: ${res.status}`);
+  const buffer = await readBoundedMedia(res, mediaFileLimitBytes(env));
   const contentType = res.headers.get("content-type")?.split(";")[0]?.trim() || "application/octet-stream";
-
-  const usage = await r2StorageUsage(env);
-  const limit = r2HardLimitBytes(env);
-  if (!canStoreWithinR2Limit(usage.bytes, buffer.byteLength, limit)) {
-    return { buffer: new ArrayBuffer(0), contentType: "application/x-line-home-ai-r2-limit" };
-  }
-
   return { buffer, contentType };
 }
 
@@ -132,4 +126,22 @@ export async function sendBestEffortTexts(env: Env, groupId: string, replyToken:
 
 export async function sendBestEffort(env: Env, groupId: string, replyToken: string | undefined, eventTimestamp: number, text: string, retryKey: string): Promise<SentMessage[]> {
   return sendBestEffortTexts(env, groupId, replyToken, eventTimestamp, [text], retryKey);
+}
+
+// Administrative verification returns booleans/quotas, never tokens or profile identifiers.
+export async function checkLineConnection(env: Env): Promise<{bot: boolean; webhook: boolean; freeMessagesRemaining: number | null}> {
+  const bot = await lineFetch(env, "https://api.line.me/v2/bot/info");
+  if (!bot.ok) throw new Error(`LINE bot authentication failed: ${bot.status}`);
+  const hook = await lineFetch(env, "https://api.line.me/v2/bot/channel/webhook/endpoint");
+  if (!hook.ok) throw new Error(`LINE webhook lookup failed: ${hook.status}`);
+  const endpoint = await hook.json() as { endpoint?: string; active?: boolean };
+  const quota = await lineFetch(env, "https://api.line.me/v2/bot/message/quota");
+  const consumption = await lineFetch(env, "https://api.line.me/v2/bot/message/quota/consumption");
+  let remaining: number | null = null;
+  if (quota.ok && consumption.ok) {
+    const q = await quota.json() as {type?:string;value?:number};
+    const c = await consumption.json() as {totalUsage?:number};
+    if (q.type === "limited" && q.value === 200 && typeof c.totalUsage === "number") remaining = Math.max(0, 200 - c.totalUsage);
+  }
+  return {bot:true, webhook:endpoint.active === true && endpoint.endpoint === "https://line-home-ai.kitworks.workers.dev/webhook", freeMessagesRemaining:remaining};
 }

@@ -1,6 +1,7 @@
 import type { Env } from "./types.js";
 
-let initialized = false;
+const initialized = new WeakMap<D1Database, Promise<void>>();
+const SCHEMA_VERSION = "home-ai-schema:1";
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS app_state (
@@ -118,14 +119,21 @@ async function migrateSchema(env: Env): Promise<void> {
 }
 
 export async function ensureSchema(env: Env): Promise<void> {
-  if (initialized) return;
   if (!env.DB) throw new Error("D1 binding DB is unavailable");
-
-  // Execute schema DDL as explicit prepared statements. This avoids treating the
-  // whole schema as one opaque multi-statement exec and gives D1 transactional,
-  // statement-level error handling through batch(). Existing partial schema is safe
-  // because every create operation is idempotent.
-  await env.DB.batch(SCHEMA_STATEMENTS.map((statement) => env.DB.prepare(statement)));
-  await migrateSchema(env);
-  initialized = true;
+  let ready = initialized.get(env.DB);
+  if (!ready) {
+    ready = (async () => {
+      try {
+        const marker = await env.DB.prepare("SELECT value FROM app_state WHERE key=?").bind(SCHEMA_VERSION).first<{value:string}>();
+        if (marker?.value === "ready") return;
+      } catch (error) { if (!/no such table/i.test(String(error))) throw error; }
+      await env.DB.batch(SCHEMA_STATEMENTS.map(statement => env.DB.prepare(statement)));
+      await migrateSchema(env);
+      await env.DB.prepare("INSERT INTO app_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
+        .bind(SCHEMA_VERSION, "ready", Date.now()).run();
+    })();
+    initialized.set(env.DB, ready);
+    void ready.catch(() => initialized.delete(env.DB));
+  }
+  await ready;
 }
