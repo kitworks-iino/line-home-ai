@@ -35,3 +35,23 @@ test('failed platform delivery prevents successful webhook verification',async t
 test('pending LINE video content is retried instead of saving an empty attachment',async t=>{
  mock(t,expected,true);await assert.rejects(getMessageContent(env,'pending-video'),/still processing/);
 });
+test('explicit admin repair updates only the known obsolete Home AI endpoint',async t=>{
+ let endpoint='https://line-home-ai.ii-kt.workers.dev/webhook',writes=0;
+ t.mock.method(globalThis,'fetch',async(url,init={})=>{
+  const u=String(url);
+  if(u.includes('/oauth2/'))return Response.json({access_token:'synthetic-token',expires_in:900});
+  if(u.endsWith('/info'))return Response.json({});
+  if(u.endsWith('/endpoint')){if(init.method==='PUT'){endpoint=JSON.parse(init.body).endpoint;writes++;return Response.json({});}return Response.json({endpoint,active:true});}
+  if(u.endsWith('/test'))return Response.json({success:true,statusCode:200});
+  if(u.endsWith('/consumption'))return Response.json({totalUsage:0});
+  if(u.endsWith('/quota'))return Response.json({type:'limited',value:200});
+  throw new Error('Unexpected request');
+ });
+ const result=await checkLineConnection(env,true);assert.equal(result.legacyEndpointUpdated,true);assert.equal(result.webhook,true);assert.equal(writes,1);assert.equal(endpoint,expected);
+});
+test('read-only checks never change even the known legacy endpoint',async t=>{
+ const calls=mock(t,'https://line-home-ai.ii-kt.workers.dev/webhook',true);const result=await checkLineConnection(env);assert.equal(result.legacyEndpointUpdated,false);assert.ok(calls.every(([,init])=>init.method!=='PUT'));
+});
+test('repair mode cannot overwrite an unrelated custom endpoint',async t=>{
+ const calls=mock(t,'https://example.invalid/custom-webhook',true);const result=await checkLineConnection(env,true);assert.equal(result.legacyEndpointUpdated,false);assert.equal(result.webhook,false);assert.ok(calls.every(([,init])=>init.method!=='PUT'));
+});

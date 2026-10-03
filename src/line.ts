@@ -133,15 +133,28 @@ export async function sendBestEffort(env: Env, groupId: string, replyToken: stri
 export interface LineConnectionStatus {
   bot: boolean; webhook: boolean; freeMessagesRemaining: number | null;
   webhookActive: boolean; endpointMatches: boolean; endpointHost: string; endpointPath: string;
-  webhookTest: boolean; webhookTestStatus: number | null;
+  webhookTest: boolean; webhookTestStatus: number | null; legacyEndpointUpdated: boolean;
 }
-export async function checkLineConnection(env: Env): Promise<LineConnectionStatus> {
+export async function checkLineConnection(env: Env, repairLegacyEndpoint = false): Promise<LineConnectionStatus> {
   const expected = "https://line-home-ai.kitworks.workers.dev/webhook";
   const bot = await lineFetch(env, "https://api.line.me/v2/bot/info");
   if (!bot.ok) throw new Error(`LINE bot authentication failed: ${bot.status}`);
   const hook = await lineFetch(env, "https://api.line.me/v2/bot/channel/webhook/endpoint");
   if (!hook.ok) throw new Error(`LINE webhook lookup failed: ${hook.status}`);
-  const endpoint = await hook.json() as { endpoint?: string; active?: boolean };
+  let endpoint = await hook.json() as { endpoint?: string; active?: boolean };
+  let legacyEndpointUpdated = false;
+  // Explicit administrative repair only. Never overwrite an unknown/custom endpoint.
+  if (repairLegacyEndpoint && endpoint.endpoint === "https://line-home-ai.ii-kt.workers.dev/webhook") {
+    const changed = await lineFetch(env, "https://api.line.me/v2/bot/channel/webhook/endpoint", {
+      method:"PUT", headers:{"content-type":"application/json"}, body:JSON.stringify({endpoint:expected}),
+    });
+    if (!changed.ok) throw new Error(`LINE webhook update failed: ${changed.status}`);
+    legacyEndpointUpdated = true;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const refreshed = await lineFetch(env, "https://api.line.me/v2/bot/channel/webhook/endpoint");
+    if (!refreshed.ok) throw new Error(`LINE webhook lookup failed: ${refreshed.status}`);
+    endpoint = await refreshed.json() as {endpoint?:string;active?:boolean};
+  }
   let endpointHost = "", endpointPath = "";
   try { const url = new URL(endpoint.endpoint ?? ""); endpointHost=url.hostname.slice(0,200); endpointPath=url.pathname.slice(0,200); } catch { /* No query parameters or credentials are disclosed. */ }
   const webhookActive = endpoint.active === true;
@@ -161,5 +174,5 @@ export async function checkLineConnection(env: Env): Promise<LineConnectionStatu
     if (q.type === "limited" && q.value === 200 && typeof c.totalUsage === "number") remaining = Math.max(0, 200 - c.totalUsage);
   }
   return {bot:true, webhook:webhookActive && endpointMatches && webhookTest, freeMessagesRemaining:remaining,
-    webhookActive, endpointMatches, endpointHost, endpointPath, webhookTest, webhookTestStatus:outcome.statusCode ?? null};
+    webhookActive, endpointMatches, endpointHost, endpointPath, webhookTest, webhookTestStatus:outcome.statusCode ?? null, legacyEndpointUpdated};
 }
