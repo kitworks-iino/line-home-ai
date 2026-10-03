@@ -1,5 +1,5 @@
 import type { Env, MessageRow } from "./types.js";
-import { mediaStore, mediaDigest, MEDIA_CHUNK_BYTES, MediaLimitError } from "./media-store.js";
+import { mediaStore, mediaDigest, MEDIA_FILE_BYTES, MediaLimitError } from "./media-store.js";
 import { answer, mediaInputs } from "./gemini.js";
 import { checkLineConnection, pushText } from "./line.js";
 import { getBoundGroup } from "./db.js";
@@ -22,7 +22,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
   let before: Record<string,number> | null = null;
   try {
     before = await counts();
-    const sample = new Uint8Array(MEDIA_CHUNK_BYTES + 17);
+    const sample = new Uint8Array(MEDIA_FILE_BYTES);
     for (let i=0;i<sample.length;i++) sample[i]=i%251;
     const objectKey = `groups/${group}/media/chunk-test`;
     await store.put(objectKey,sample.buffer,{contentType:"application/octet-stream"});
@@ -30,6 +30,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
     if (!obj || await mediaDigest(await obj.arrayBuffer()) !== await mediaDigest(sample.buffer)) throw new Error("storage_round_trip_failed");
     await store.put(objectKey,sample.buffer,{contentType:"application/octet-stream"});
     result.chunkRoundTrip=true;
+    result.verifiedBytes=sample.byteLength;
     result.duplicateWrite=true;
     await store.delete(objectKey);
     let cancelled=false;
@@ -49,6 +50,18 @@ export async function runStorageVerification(env: Env, release: string, runId: s
       result.geminiAttachment=true;
       result.model=response.model;
     } finally { await media.cleanup(); }
+
+    // A fixed synthetic blue PNG verifies the actual binary-image model path too.
+    const png = atob("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAYElEQVR4nO3PQQ0AIBDAsAP/nkEEj4ZkVbCtmTM/2zrgVQNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgPaBVCHAX/y3CvgAAAAAElFTkSuQmCC");
+    const imageKey = `groups/${group}/media/image-test`;
+    await store.put(imageKey,Uint8Array.from(png,c=>c.charCodeAt(0)).buffer,{contentType:"image/png"});
+    const imageMessage = {...message,line_message_id:"synthetic-image-test",media_key:imageKey,mime_type:"image/png",type:"image"};
+    const image = await mediaInputs(env,[imageMessage],1);
+    try {
+      const response = await answer(env,"画像に基づいて日本語で簡潔に回答してください。","添付画像の全面は何色ですか。一語で答えてください。",image.inputs,"low",undefined,{modelTimeoutMs:20_000,deadlineMs:45_000,maxOutputTokens:128});
+      if (!response.model || !/青|blue/i.test(response.text)) throw new Error("gemini_image_failed");
+      result.geminiImage=true;
+    } finally { await image.cleanup(); }
 
     const connection = await checkLineConnection(env);
     result.lineAuthentication=connection.bot;
