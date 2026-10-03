@@ -1,4 +1,4 @@
-# D1添付ストレージ（v1.7.0）
+# D1添付ストレージ（v1.7.1）
 
 Home AIはR2を使わず、会話DBとは別のD1 MEDIA_DBに添付を保存します。画像・音声・動画・ファイルの受付、対応形式のGemini参照、送信取消、管理者のデータ削除を維持します。対応外形式は保存してメタデータで説明し、内容を見たとは回答しません。
 
@@ -30,7 +30,7 @@ npm run test:runtime：Miniflare/workerdのD1バインディングで0 bytes、1
 本番の固定合成テストは認証済みCloudflare APIからMEMORY_QUEUEへ、次のJSONを送ります。公開HTTP管理エンドポイントは作りません。
 
 ```json
-{"kind":"verify-storage","release":"1.7.0","runId":"unique-run-id","notify":false}
+{"kind":"verify-storage","release":"1.7.1","runId":"unique-run-id","notify":false}
 ```
 
 専用の合成グループキーでD1に保存・再取得・削除し、合成添付の検証文字列でGemini応答を確認します。家庭内会話を外部テストに送りません。LINEの認証と既存Webhookも照合します。notify=trueの場合だけ、月200件無料枠と残量を確認できれば既存グループに1通の検証メッセージを送ります。
@@ -40,3 +40,5 @@ npm run test:runtime：Miniflare/workerdのD1バインディングで0 bytes、1
 ## 配備
 
 DBとMEDIA_DBは既存D1の明示IDに接続します。r2_bucketsや旧MEDIAを残さず、プレビューURLを無効にします。main更新後にCI、Cloudflare Builds、本番バージョンを確認します。旧R2の物理削除や請求契約は別事項です。旧バケットにデータが増えていた場合は切替前に移行し、検証前に削除しません。
+
+ネイティブUint8Arrayのbase64変換を使い、重複保存・取消済みキーは大きなバイナリを再送する前に判定します。CPU上限を超える場合に有料化で回避することはありません。本番のHTTPヘルスチェックと署名拒否テストもmainのCIで実行します。

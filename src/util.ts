@@ -25,6 +25,9 @@ export function safeJson<T>(text: string): T {
 
 export function base64FromArrayBuffer(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
+  // Native typed-array codecs avoid millions of JS argument conversions on Workers Free.
+  const native = bytes as Uint8Array & { toBase64?: () => string };
+  if (native.toBase64) return native.toBase64();
   let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
