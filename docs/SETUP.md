@@ -59,30 +59,14 @@ Gemini Free TierにはモデルごとのRPM・TPM・RPD等のレート制限が�
 
 ---
 
-## 3. CloudflareでR2を有効化する
+## 3. Workers Freeと専用D1を確認する
 
-**初回だけ必要です。ここを飛ばすと、Workerの初回Deploy時に `Please enable R2 through the Cloudflare Dashboard. [code: 10042]` で失敗します。**
+R2を有効化する操作は不要です。R2の解約予約は取り消しません。
 
-1. Cloudflare Dashboard → **Storage & databases → R2 → Overview** を開きます。
-2. **R2サブスクリプションをアカウントに追加する** を選びます。
-3. 画面上の開始時合計が `$0.00` で、R2 Standardの無料使用量が含まれていることを確認して有効化します。
-4. **Bucketは手作業で作成しません。** 後続のWrangler deployが `MEDIA` bucketを自動プロビジョニングします。
+- 会話用：DB → line-home-ai-db
+- 添付用：MEDIA_DB → line-home-ai-media-db
 
-### 重要: 「無料枠」は自動停止ではない
-
-R2 subscriptionはPay-as-you-goです。Cloudflare R2の無料枠を超えても、Cloudflareが容量超過エラーで自動停止するわけではなく、超過分は従量課金されます。CloudflareのBudget Alertも通知だけで、ハード上限ではありません。
-
-2026-09-03時点のR2 Standard無料枠:
-
-- Storage: **10 GB-month / month**
-- Class A: **1,000,000 operations / month**
-- Class B: **10,000,000 operations / month**
-- Egress: free
-- DeleteObject: free operation
-
-Home AIはR2を当初設計どおり維持しつつ、Storageについては**任意の安全余裕を取らず、無料枠そのものと同じ10,000,000,000 bytesをアプリ側ハード上限**にしています。新規添付の保存前にR2の実オブジェクト容量を全ページ集計し、保存後に10GBを超える場合だけバイナリ本体を保存しません。
-
-詳細: [R2 Free Tier / 課金境界の扱い](R2_FREE_TIER.md)
+既存環境では両方作成済みで、wrangler.jsoncにIDを明記しています。別アカウントへの配備時だけ、そのアカウントのD1 IDへ変更します。添付は元データ合計300 MB、1ファイル16 MiBまで。上限では新規添付を保存せず通知し、既存データを自動で削除しません。[詳細](D1_MEDIA.md)。
 
 ---
 
@@ -100,18 +84,9 @@ Cloudflare Dashboardで以下を行います。
 8. Deploy commandは **`npx wrangler deploy`** を使用します。
 9. Deployします。
 
-### D1 / R2 / Queuesは手作業で作らない
+### 既存D1とQueuesを維持する
 
-`wrangler.jsonc` ではD1、R2、QueueをリソースIDなしのbindingとして宣言しています。現行Wrangler/Cloudflareの自動プロビジョニングにより、初回Deploy時に必要なリソースが作成・bindingされます。
-
-対象:
-
-- D1 binding: `DB`
-- R2 binding: `MEDIA`
-- Queue: `line-home-ai-events`
-- Dead Letter Queue: `line-home-ai-dead-letter`
-
-`dead_letter_queue` に指定したQueueが未作成でもCloudflare側で作成されます。Cloudflare UIでリソース作成確認が表示された場合は許可してください。
+DBとMEDIA_DBは既存D1の明示IDに接続します。R2の自動作成はありません。line-home-ai-events、line-home-ai-memoryと各dead-letter queueを維持します。
 
 **D1 migrationをCLIで実行する必要もありません。** Workerが初回アクセス時にスキーマを自己初期化し、将来の加算的migrationもコード側で処理します。
 
@@ -142,7 +117,8 @@ Cloudflare Dashboardで以下を行います。
 - `MEMORY_BATCH_SIZE=24`
 - `RECENT_MESSAGE_LIMIT=40`
 - `MAX_MEDIA_CONTEXT=3`
-- `R2_STORAGE_HARD_LIMIT_BYTES=10000000000`
+- `MEDIA_STORAGE_LIMIT_BYTES=300000000`
+- `MEDIA_MAX_FILE_BYTES=16777216`
 
 CloudflareがSecret変更に対する再Deployを要求した場合は実行します。
 
@@ -231,11 +207,11 @@ adminが送信:
 
 登録メンバーが `2/2` になっていることを確認します。
 
-続いてR2の実使用量も確認します。
+続いてD1添付保存の使用量も確認します。
 
 `/usage`
 
-初期状態ではほぼ0 GB / 10 GBになります。
+初期状態では0 bytes / 300 MBです。
 
 その後、たとえば次を試します。
 
@@ -253,7 +229,7 @@ adminが送信:
 
 - `/help` — コマンド一覧
 - `/status` — 稼働状態と保存件数
-- `/usage` — R2の実保存量 / 10GBハード上限 / オブジェクト数
+- `/usage` — D1添付の保存量 / 合計300 MB・1ファイル16 MiBの上限 / ファイル数
 - `/members` — 承認済みメンバー
 - `/memories [検索語]` — 長期記憶を確認
 - `/remember 内容` — 明示的に長期記憶へ追加
@@ -270,7 +246,7 @@ adminが送信:
 承認済みユーザーがLINEでメッセージを送信取消した場合、Webhookのunsend eventを受けて次を処理します。
 
 - 生メッセージ本文をD1上で無効化
-- 対応するR2メディアを削除
+- 対応するD1添付とチャンクを削除
 - そのメッセージを根拠にした自動長期記憶を無効化
 - そのメッセージを根拠にした要約を削除
 - 派生source linkを削除

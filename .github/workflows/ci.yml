@@ -1,13 +1,17 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, fix/d1-attachments-without-r2]
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -16,3 +20,17 @@ jobs:
           package-manager-cache: false
       - run: npm install --no-audit --no-fund
       - run: npm run check
+      - name: Package verified sources and Worker build
+        if: always()
+        run: |
+          mkdir -p verification-artifact
+          git archive --format=tar.gz HEAD > verification-artifact/source.tar.gz
+          if [ -d dist ]; then cp -R dist verification-artifact/dist; fi
+          if [ -f package-lock.json ]; then cp package-lock.json verification-artifact/package-lock.json; fi
+          git rev-parse HEAD > verification-artifact/commit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-worker-${{ github.sha }}
+          path: verification-artifact/
+          retention-days: 1

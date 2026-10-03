@@ -3,9 +3,9 @@ export type ThinkingLevel = "low" | "medium" | "high";
 export interface Env {
   EVENT_SEARCH_PROVIDER?: string;
   DB: D1Database;
-  MEDIA: R2Bucket;
+  MEDIA_DB: D1Database;
   EVENT_QUEUE: Queue<LineQueuePayload>;
-  MEMORY_QUEUE: Queue<MemoryQueuePayload | DiagnosticQueuePayload | CleanupQueuePayload>;
+  MEMORY_QUEUE: Queue<MemoryQueuePayload | DiagnosticQueuePayload | CleanupQueuePayload | StorageVerificationPayload>;
   LINE_CHANNEL_ID: string;
   LINE_CHANNEL_SECRET: string;
   GEMINI_API_KEY: string;
@@ -18,7 +18,8 @@ export interface Env {
   MEMORY_BATCH_SIZE: string;
   RECENT_MESSAGE_LIMIT: string;
   MAX_MEDIA_CONTEXT: string;
-  R2_STORAGE_HARD_LIMIT_BYTES: string;
+  MEDIA_STORAGE_LIMIT_BYTES: string;
+  MEDIA_MAX_FILE_BYTES: string;
   GEMINI_MODEL_TIMEOUT_MS: string;
   GEMINI_REPLY_DEADLINE_MS: string;
   GEMINI_DEEP_DEADLINE_MS: string;
@@ -42,7 +43,8 @@ export interface MemoryQueuePayload {
 
 export interface CleanupQueuePayload { kind: "cleanup"; files: string[] }
 export interface DiagnosticQueuePayload { kind: "diagnostic"; release: string }
-export type QueuePayload = LineQueuePayload | MemoryQueuePayload | DiagnosticQueuePayload | CleanupQueuePayload;
+export interface StorageVerificationPayload { kind: "verify-storage"; release: string; runId: string; notify?: boolean }
+export type QueuePayload = LineQueuePayload | MemoryQueuePayload | DiagnosticQueuePayload | CleanupQueuePayload | StorageVerificationPayload;
 
 export interface LineWebhookBody {
   destination: string;

@@ -1,3 +1,4 @@
+import { mediaStore } from "./media-store.js";
 import type { Env, MessageRow, ThinkingLevel } from "./types.js";
 import {
   conversationModels,
@@ -12,7 +13,6 @@ import { geminiApiKey } from "./gemini-key.js";
 
 const INTERACTIONS = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const INLINE_MAX = 8 * 1024 * 1024;
-const R2_LIMIT_MARKER_MIME = "application/x-line-home-ai-r2-limit";
 const TRANSIENT_ATTEMPTS = 2;
 
 export type GeminiInput = {type:"text";text:string} | {type:"image"|"audio"|"video"|"document";mime_type:string;data?:string;uri?:string};
@@ -379,15 +379,17 @@ export async function mediaInputs(env: Env, messages: MessageRow[], max: number)
   if (count === 0) return { inputs, cleanup: async () => {} };
   const media = messages.filter((m) => m.media_key && m.mime_type && !m.unsent).slice(-count);
   for (const m of media) {
-    const obj = await env.MEDIA.get(m.media_key!);
-    if (!obj) continue;
-    const buf = await obj.arrayBuffer();
-    const mime = normalizedMime(m.mime_type!);
-    inputs.push({ type:"text", text:`添付メディア: ${m.sender_name} が送信した ${m.type} (message_id=${m.line_message_id}, mime=${mime})` });
-    if (mime === R2_LIMIT_MARKER_MIME) {
-      inputs.push({type:"text", text:"この添付はCloudflare R2 Standardの無料ストレージ上限10 GBを超えないため、バイナリ本体を保存していません。内容そのものは参照できません。必要なら /usage で現在のR2保存量を確認してください。"});
+    let buf: ArrayBuffer;
+    try {
+      const obj = await mediaStore(env).get(m.media_key!);
+      if (!obj) throw new Error("Attachment is not stored");
+      buf = await obj.arrayBuffer();
+    } catch {
+      inputs.push({type:"text", text:`添付 message_id=${m.line_message_id} は保存先から取得できず、内容を参照できません。内容を見た・聞いたと述べないでください。`});
       continue;
     }
+    const mime = normalizedMime(m.mime_type!);
+    inputs.push({ type:"text", text:`添付メディア: ${m.sender_name} が送信した ${m.type} (message_id=${m.line_message_id}, mime=${mime})` });
     if (isTextLike(mime)) {
       const decoded = new TextDecoder().decode(buf);
       const clipped = decoded.length > 200_000 ? `${decoded.slice(0,200_000)}\n[以降省略]` : decoded;

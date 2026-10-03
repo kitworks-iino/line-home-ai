@@ -1,3 +1,4 @@
+import { readBoundedMedia } from "./media-store.js";
 export class UpstreamTimeoutError extends Error {
   constructor(public readonly label: string, public readonly timeoutMs: number) {
     super(`${label} timed out after ${timeoutMs}ms`);
@@ -16,6 +17,7 @@ export async function fetchWithTimeout(
   init: RequestInit,
   timeoutMs: number,
   label: string,
+  maxResponseBytes?: number,
 ): Promise<Response> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -24,7 +26,7 @@ export async function fetchWithTimeout(
       (async () => {
         const response = await fetch(input, { ...init, signal: controller.signal });
         // Buffer under the same deadline: callers cannot hang on a partial body.
-        const body = response.body ? await response.arrayBuffer() : null;
+        const body = response.body ? (maxResponseBytes === undefined ? await response.arrayBuffer() : await readBoundedMedia(response, maxResponseBytes)) : null;
         return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
       })(),
       new Promise<never>((_, reject) => {

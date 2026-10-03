@@ -1,3 +1,5 @@
+import { ensureMediaSchema, mediaCapacityBytes, mediaFileLimitBytes } from "./media-store.js";
+import { STORAGE_RELEASE } from "./storage-verification.js";
 import type { Env, LineQueuePayload, LineWebhookBody, QueuePayload } from "./types.js";
 import { ensureSchema } from "./schema.js";
 import { DEFAULT_IMPLICIT_FOLLOWUP_WINDOW_MS } from "./invocation.js";
@@ -44,23 +46,31 @@ export default {
         database = false;
         console.error("health schema initialization failed", error);
       }
+      let mediaDatabase = true;
+      try { await ensureMediaSchema(env); } catch { mediaDatabase = false; }
       const configured = Object.values(required).every(Boolean);
       const routing = modelRoute(env);
       const upstreamCheck = database && configured ? await releaseCheck(env).catch(()=>({state:"unavailable"})) : null;
+      const verificationRow = database ? await env.DB.prepare("SELECT value FROM app_state WHERE key='storage_verification_latest'").first<{value:string}>().catch(()=>null) : null;
+      let storageVerification: unknown = null;
+      try { if (verificationRow) storageVerification = JSON.parse(verificationRow.value); } catch { /* Invalid diagnostic JSON is not exposed. */ }
       const latencyRow = database ? await env.DB.prepare("SELECT value FROM app_state WHERE key='last_reply_latency'").first<{value:string}>().catch(()=>null) : null;
       let lastReplyLatency: unknown = null;
       try { if (latencyRow) lastReplyLatency = JSON.parse(latencyRow.value); } catch { /* no saved sample */ }
       return Response.json({
-        ok: database,
-        ready: database && configured,
+        ok: database && mediaDatabase,
+        ready: database && mediaDatabase && configured,
         service:"line-home-ai",
         model:routing.primary,
         modelRouting:routing,
-        version:RELEASE,
+        version:STORAGE_RELEASE,
+        modelDiagnosticsRelease:RELEASE,
+        storageVerification,
         lastReplyLatency,
         upstreamCheck,
         events:{contextualIntent:true,defaultLocation:"静岡県浜松市",timeZone:"Asia/Tokyo",searchModels:env.EVENT_SEARCH_PROVIDER === "live" ? ["gemini-3.8-live"] : ["gemini-2.5-flash","gemini-2.5-flash-lite"],dailySearchCap:450},
         database,
+        storage: { backend: "d1", ready: mediaDatabase, r2Required: false, capacityBytes: mediaCapacityBytes(env), maxFileBytes: mediaFileLimitBytes(env) },
         queues:{reply:"line-home-ai-events",memory:"line-home-ai-memory",isolated:true},
         latency:{
           modelTimeoutMs:boundedMs(env.GEMINI_MODEL_TIMEOUT_MS,45_000,10_000,90_000),
@@ -75,7 +85,7 @@ export default {
           rule:"immediate unquoted turn after Home AI",
         },
         configuration:required,
-      }, { status: database ? 200 : 503 });
+      }, { status: database && mediaDatabase ? 200 : 503 });
     }
     if(url.pathname==="/webhook"&&request.method==="POST") return webhook(request,env);
     return new Response("Not Found",{status:404});
