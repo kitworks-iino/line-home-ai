@@ -62,6 +62,7 @@ export async function getGroupMemberProfile(env: Env, groupId: string, userId: s
 
 export async function getMessageContent(env: Env, messageId: string): Promise<{buffer:ArrayBuffer;contentType:string}> {
   const res = await lineFetch(env, `https://api-data.line.me/v2/bot/message/${encodeURIComponent(messageId)}/content`, {}, mediaFileLimitBytes(env));
+  if (res.status === 202) throw new Error("LINE attachment is still processing; retry without saving empty content");
   if (res.status === 404 || res.status === 410) throw new MediaLimitError("expired");
   if (!res.ok) throw new Error(`LINE content fetch failed: ${res.status}`);
   const buffer = await readBoundedMedia(res, mediaFileLimitBytes(env));
@@ -128,13 +129,29 @@ export async function sendBestEffort(env: Env, groupId: string, replyToken: stri
   return sendBestEffortTexts(env, groupId, replyToken, eventTimestamp, [text], retryKey);
 }
 
-// Administrative verification returns booleans/quotas, never tokens or profile identifiers.
-export async function checkLineConnection(env: Env): Promise<{bot: boolean; webhook: boolean; freeMessagesRemaining: number | null}> {
+// Administrative verification returns only state and sanitized endpoint routing metadata.
+export interface LineConnectionStatus {
+  bot: boolean; webhook: boolean; freeMessagesRemaining: number | null;
+  webhookActive: boolean; endpointMatches: boolean; endpointHost: string; endpointPath: string;
+  webhookTest: boolean; webhookTestStatus: number | null;
+}
+export async function checkLineConnection(env: Env): Promise<LineConnectionStatus> {
+  const expected = "https://line-home-ai.kitworks.workers.dev/webhook";
   const bot = await lineFetch(env, "https://api.line.me/v2/bot/info");
   if (!bot.ok) throw new Error(`LINE bot authentication failed: ${bot.status}`);
   const hook = await lineFetch(env, "https://api.line.me/v2/bot/channel/webhook/endpoint");
   if (!hook.ok) throw new Error(`LINE webhook lookup failed: ${hook.status}`);
   const endpoint = await hook.json() as { endpoint?: string; active?: boolean };
+  let endpointHost = "", endpointPath = "";
+  try { const url = new URL(endpoint.endpoint ?? ""); endpointHost=url.hostname.slice(0,200); endpointPath=url.pathname.slice(0,200); } catch { /* No query parameters or credentials are disclosed. */ }
+  const webhookActive = endpoint.active === true;
+  const endpointMatches = endpoint.endpoint === expected;
+  // Official LINE test sends a signed empty event. This never changes channel configuration.
+  const test = await lineFetch(env, "https://api.line.me/v2/bot/channel/webhook/test", {
+    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({endpoint:expected}),
+  });
+  const outcome = test.ok ? await test.json() as {success?:boolean;statusCode?:number} : {};
+  const webhookTest = outcome.success === true && outcome.statusCode === 200;
   const quota = await lineFetch(env, "https://api.line.me/v2/bot/message/quota");
   const consumption = await lineFetch(env, "https://api.line.me/v2/bot/message/quota/consumption");
   let remaining: number | null = null;
@@ -143,5 +160,6 @@ export async function checkLineConnection(env: Env): Promise<{bot: boolean; webh
     const c = await consumption.json() as {totalUsage?:number};
     if (q.type === "limited" && q.value === 200 && typeof c.totalUsage === "number") remaining = Math.max(0, 200 - c.totalUsage);
   }
-  return {bot:true, webhook:endpoint.active === true && endpoint.endpoint === "https://line-home-ai.kitworks.workers.dev/webhook", freeMessagesRemaining:remaining};
+  return {bot:true, webhook:webhookActive && endpointMatches && webhookTest, freeMessagesRemaining:remaining,
+    webhookActive, endpointMatches, endpointHost, endpointPath, webhookTest, webhookTestStatus:outcome.statusCode ?? null};
 }

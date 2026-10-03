@@ -59,7 +59,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
 
     phase("image_attachment_model");
     // A fixed synthetic blue PNG verifies the actual binary-image model path too.
-    const png = atob("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAYElEQVR4nO3PQQ0AIBDAsAP/nkEEj4ZkVbCtmTM/2zrgVQNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgPaBVCHAX/y3CvgAAAAAElFTkSuQmCC");
+    const png = atob("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAYElEQVR4nO3PQQ0AIBDAsAP/nkEEj4ZkVbCtmTM/2zrgVQNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgPaBVCHAX/y3CvgAAAAAElFTkSuQmCC");
     const imageKey = `groups/${group}/media/image-test`;
     await store.put(imageKey,Uint8Array.from(png,c=>c.charCodeAt(0)).buffer,{contentType:"image/png"});
     const imageMessage = {...message,line_message_id:"synthetic-image-test",media_key:imageKey,mime_type:"image/png",type:"image"};
@@ -72,6 +72,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
 
     phase("line_connection");
     const connection = await checkLineConnection(env);
+    result.lineDetails=connection;
     result.lineAuthentication=connection.bot;
     result.lineWebhook=connection.webhook;
     if (!connection.webhook) throw new Error("line_webhook_not_active");
