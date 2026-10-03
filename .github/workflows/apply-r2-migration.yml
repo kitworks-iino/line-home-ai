@@ -25,14 +25,21 @@ jobs:
       - name: Apply reviewed source transformations
         run: python scripts/apply-r2-migration.py
       - run: npm install --no-audit --no-fund
+      - name: Preserve exact test-runtime dependencies for reproducible diagnosis
+        run: |
+          mkdir -p verification-artifact
+          tar -czf verification-artifact/runtime-dependencies.tar.gz node_modules
+          cp node_modules/miniflare/dist/src/index.d.ts verification-artifact/miniflare-contract.d.ts
       - name: Typecheck, regression tests, workerd/D1 integration and build
-        run: npm run check
+        run: |
+          npm run check > verification-artifact/check.log 2>&1 || { tail -100 verification-artifact/check.log; exit 1; }
+          tail -40 verification-artifact/check.log
       - name: Commit only after successful verification
         run: |
           rm scripts/apply-r2-migration.py .github/workflows/apply-r2-migration.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add .github package.json package-lock.json wrangler.jsonc src tests docs scripts README.md
           git commit -m 'feat: migrate Home AI attachments to D1 without R2; verify runtime and boundaries'
           git push origin HEAD:fix/d1-attachments-without-r2
       - name: Package verified source and build
