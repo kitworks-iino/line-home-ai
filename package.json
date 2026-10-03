@@ -1,6 +1,6 @@
 {
   "name": "line-home-ai",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "private": true,
   "type": "module",
   "description": "A production-oriented family AI resident in a LINE group, powered by Gemini and Cloudflare Workers.",

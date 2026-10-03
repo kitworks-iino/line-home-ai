@@ -34,3 +34,21 @@ jobs:
           name: verified-worker-${{ github.sha }}
           path: verification-artifact/
           retention-days: 1
+  production-http:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'kitworks-iino/line-home-ai'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Verify deployed HTTP health and signature rejection
+        run: node scripts/production-smoke.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: production-http-${{ github.sha }}
+          path: production-http-artifact/
+          retention-days: 1

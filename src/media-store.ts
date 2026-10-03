@@ -85,7 +85,19 @@ export function mediaStore(env: MediaEnv) {
       const metadata = JSON.stringify(options.metadata ?? {});
       if (new TextEncoder().encode(metadata).byteLength > 8192 || options.contentType.length > 256) throw new Error("Attachment metadata too large");
       await ensureMediaSchema(env);
+      // Avoid encoding or transferring a large object again on queue redelivery/cancellation.
+      // The atomic INSERT below still rechecks both conditions against concurrent changes.
+      const prior = await db.prepare(`SELECT
+        (SELECT digest FROM media_objects WHERE key=?) AS digest,
+        (SELECT size FROM media_objects WHERE key=?) AS size,
+        EXISTS(SELECT 1 FROM media_tombstones WHERE key=?) AS cancelled`)
+        .bind(key, key, key).first<{digest:string|null;size:number|null;cancelled:number}>();
+      if (prior?.cancelled) throw new MediaLimitError("cancelled");
       const digest = await mediaDigest(buffer);
+      if (prior?.digest) {
+        if (prior.digest !== digest || prior.size !== buffer.byteLength) throw new Error("Attachment key collision; original data preserved");
+        return;
+      }
       const chunks: string[] = [];
       for (let i = 0; i < buffer.byteLength; i += MEDIA_CHUNK_BYTES) chunks.push(base64FromArrayBuffer(buffer.slice(i, i + MEDIA_CHUNK_BYTES)));
       const insert = db.prepare(`INSERT INTO media_objects(key,group_id,size,content_type,metadata,digest,chunks,capacity_limit,created_at)
@@ -131,11 +143,12 @@ export function mediaStore(env: MediaEnv) {
           for (let n = 0; n < result.results.length; n++) {
             const chunk = result.results[n]!;
             if (chunk.ordinal !== start + n) throw new Error("Attachment chunk order invalid");
-            const binary = atob(chunk.data);
+            const codec = Uint8Array as unknown as {fromBase64?: (value:string) => Uint8Array};
+            const decoded = codec.fromBase64 ? codec.fromBase64(chunk.data) : Uint8Array.from(atob(chunk.data), c => c.charCodeAt(0));
             const expected = Math.min(MEDIA_CHUNK_BYTES, row.size - offset);
-            if (binary.length !== expected) throw new Error("Attachment chunk size invalid");
-            for (let j = 0; j < binary.length; j++) output[offset + j] = binary.charCodeAt(j);
-            offset += binary.length;
+            if (decoded.byteLength !== expected) throw new Error("Attachment chunk size invalid");
+            output.set(decoded, offset);
+            offset += decoded.byteLength;
           }
         }
         if (offset !== row.size || await mediaDigest(output.buffer) !== row.digest) throw new Error("Attachment integrity check failed");

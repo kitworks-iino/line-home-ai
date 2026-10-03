@@ -4,7 +4,7 @@ import { answer, mediaInputs } from "./gemini.js";
 import { checkLineConnection, pushText } from "./line.js";
 import { getBoundGroup } from "./db.js";
 
-export const STORAGE_RELEASE = "1.7.0";
+export const STORAGE_RELEASE = "1.7.1";
 const PREFIX = "storage_verification:";
 
 // Only an authenticated Cloudflare Queue producer can request this job. No HTTP admin route.
@@ -19,19 +19,24 @@ export async function runStorageVerification(env: Env, release: string, runId: s
   const group = `__verification_${runId}`;
   const store = mediaStore(env);
   const counts = async () => (await env.DB.prepare("SELECT (SELECT COUNT(*) FROM messages) AS messages,(SELECT COUNT(*) FROM members) AS members,(SELECT COUNT(*) FROM groups) AS groups,(SELECT COUNT(*) FROM memories) AS memories").first<Record<string,number>>());
+  const phase = (name: string) => { result.phase=name; console.log(`storage_verification_phase ${name}`); };
   let before: Record<string,number> | null = null;
   try {
     before = await counts();
+    phase("max_size_save");
     const sample = new Uint8Array(MEDIA_FILE_BYTES);
     for (let i=0;i<sample.length;i++) sample[i]=i%251;
     const objectKey = `groups/${group}/media/chunk-test`;
     await store.put(objectKey,sample.buffer,{contentType:"application/octet-stream"});
+    phase("max_size_read");
     const obj = await store.get(objectKey);
     if (!obj || await mediaDigest(await obj.arrayBuffer()) !== await mediaDigest(sample.buffer)) throw new Error("storage_round_trip_failed");
+    phase("duplicate_save");
     await store.put(objectKey,sample.buffer,{contentType:"application/octet-stream"});
     result.chunkRoundTrip=true;
     result.verifiedBytes=sample.byteLength;
     result.duplicateWrite=true;
+    phase("delete_and_retry");
     await store.delete(objectKey);
     let cancelled=false;
     try { await store.put(objectKey,sample.buffer,{contentType:"application/octet-stream"}); }
@@ -39,6 +44,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
     if (!cancelled || await store.get(objectKey)) throw new Error("storage_delete_failed");
     result.deleteAndRetry=true;
 
+    phase("text_attachment_model");
     const challenge = `HOMEAI_${crypto.randomUUID().replaceAll("-","").slice(0,12)}`;
     const textKey = `groups/${group}/media/text-test`;
     await store.put(textKey,new TextEncoder().encode(`検証文字列：${challenge}`).buffer,{contentType:"text/plain"});
@@ -51,6 +57,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
       result.model=response.model;
     } finally { await media.cleanup(); }
 
+    phase("image_attachment_model");
     // A fixed synthetic blue PNG verifies the actual binary-image model path too.
     const png = atob("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAYElEQVR4nO3PQQ0AIBDAsAP/nkEEj4ZkVbCtmTM/2zrgVQNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgNaA1oDWgPaBVCHAX/y3CvgAAAAAElFTkSuQmCC");
     const imageKey = `groups/${group}/media/image-test`;
@@ -63,6 +70,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
       result.geminiImage=true;
     } finally { await image.cleanup(); }
 
+    phase("line_connection");
     const connection = await checkLineConnection(env);
     result.lineAuthentication=connection.bot;
     result.lineWebhook=connection.webhook;
@@ -83,6 +91,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
     const message=error instanceof Error ? error.message : "verification_failed";
     result.error=/^[a-z_]+(?:_[0-9]+)?$/.test(message) ? message : "verification_failed";
   } finally {
+    phase("cleanup");
     try { await store.deleteGroup(group); result.testDataRemoved=true; } catch { result.testDataRemoved=false; result.state="failed"; }
     try { const after=await counts(); result.dataCounts=after; result.householdCountsUnchanged=JSON.stringify(before)===JSON.stringify(after); } catch { result.householdCountsUnchanged=false; }
     if (!result.householdCountsUnchanged) result.state="failed";
