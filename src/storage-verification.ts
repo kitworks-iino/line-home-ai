@@ -71,7 +71,7 @@ export async function runStorageVerification(env: Env, release: string, runId: s
     } finally { await image.cleanup(); }
 
     phase("line_connection");
-    const connection = await checkLineConnection(env);
+    const connection = await checkLineConnection(env, true);
     result.lineDetails=connection;
     result.lineAuthentication=connection.bot;
     result.lineWebhook=connection.webhook;
